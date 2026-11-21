@@ -1,0 +1,292 @@
+@using Forge.Dashboard.Services
+@implements IDisposable
+
+<section class="intake-brief intake-brief--reading" aria-label="Working brief">
+    <header class="intake-brief__header">
+        <h2>Working brief</h2>
+        @if (_detail is { } headingDetail)
+        {
+            var headingProposal = headingDetail.Proposal;
+            <div class="intake-brief__state">
+                <span class="intake-brief__approval-state @(headingProposal.ApprovedAt is not null ? "intake-brief__approval-state--approved" : "")">
+                    @if (headingProposal.ApprovedAt is not null) { <span aria-hidden="true">✓</span> }
+                    @(headingProposal.ApprovedAt is null ? "Draft for review" : "Approved")
+                </span>
+                <span>Revision @headingProposal.Revision</span>
+                @if (headingProposal.ApprovedAt is null)
+                {
+                    <span>Priority @headingProposal.Priority</span>
+                }
+                @if (headingProposal.ApprovedAt is not null && headingDetail.Ingestion is { } link)
+                {
+                    <a class="intake-brief__primary-link" href="@($"/specs/{Uri.EscapeDataString(link.SpecId)}?project={Uri.EscapeDataString(ProjectId!)}")">Open specification <span aria-hidden="true">↗</span></a>
+                }
+            </div>
+        }
+        @if (_stale || _error is not null)
+        {
+            <button class="btn btn--link" disabled="@(_busy || _loading || SessionId is null)" @onclick="RefreshAsync">Refresh brief</button>
+        }
+    </header>
+    @if (_error is not null)
+    {
+        <p class="banner banner--error" role="alert">@_error</p>
+    }
+    @if (_loading && _detail is null)
+    {
+        <p class="intake-brief__empty" role="status">Loading the brief…</p>
+    }
+    else if (_detail is null)
+    {
+        <div class="intake-brief__empty">
+            <h3>The brief takes shape here</h3>
+            <p>Talk through the outcome, scope and acceptance criteria. Forge will draft a brief for your review.</p>
+        </div>
+    }
+    @if (_proposals.Count > 1 || _nextCursor is not null)
+    {
+        <div class="intake-brief__chooser">
+            <label for="@_selectId">Brief in this conversation</label>
+            <select id="@_selectId" value="@_selectedId" @onchange="ChooseAsync" disabled="@(_busy || _loading)">
+                @foreach (var item in _proposals)
+                {
+                    <option value="@item.Id">@item.Title · @(item.ApprovedAt is null ? "Draft" : "Approved")</option>
+                }
+            </select>
+            @if (_nextCursor is not null)
+            {
+                <button class="btn btn--link" disabled="@(_busy || _loading)" @onclick="LoadMoreAsync">More briefs</button>
+            }
+        </div>
+    }
+    @if (_detail is { } detail)
+    {
+        var proposal = detail.Proposal;
+        @if (proposal.ApprovedAt is not null)
+        {
+            <details class="intake-brief__handoff-details" aria-label="Planning handoff">
+                <summary>@HandoffTitle <span>Planning details</span></summary>
+                <div class="intake-brief__handoff-content">
+                    <p>Revision @proposal.Revision approved @proposal.ApprovedAt?.ToLocalTime().ToString("MMM d, yyyy 'at' h:mm tt").</p>
+                    <p>Priority @proposal.Priority · @(proposal.Origin == "forge" ? "Suggested by Forge" : "From this conversation")</p>
+                    <p>@HandoffDescription</p>
+                    @if (detail.Ingestion is { } ingestion)
+                    {
+                        <div class="intake-brief__links">
+                            <a href="@($"/tasks/{Uri.EscapeDataString(ingestion.EpicId)}?project={Uri.EscapeDataString(ProjectId!)}")">View initiative</a>
+                            <a href="@($"/flow?project={Uri.EscapeDataString(ProjectId!)}&issue={Uri.EscapeDataString(ingestion.EpicId)}")">Follow progress</a>
+                        </div>
+                    }
+                </div>
+            </details>
+            @if (detail.Ingestion?.RefinementState == "Failed")
+            {
+                <div class="intake-brief__attention" role="status">
+                    <strong>Specification needs attention</strong>
+                    <p>@detail.Ingestion.LastError</p>
+                    <button class="btn" disabled="@(_busy || _loading || _stale)" @onclick="RetryAsync">Retry refinement</button>
+                    <span>Retrying may make another paid model request.</span>
+                </div>
+            }
+            @if (_handoffError is not null)
+            {
+                <p class="banner banner--warning">@_handoffError</p>
+            }
+        }
+        @if (_stale)
+        {
+            <p class="banner banner--warning" role="alert">The brief changed while you were reviewing it. Refresh the brief and review the latest revision before approving.</p>
+        }
+        <div class="intake-brief__navigation">
+            <div class="intake-brief__tabs" role="group" aria-label="Brief view">
+                <button class="intake-brief__tab @(!_showChanges ? "intake-brief__tab--active" : "")" aria-pressed='@(!_showChanges ? "true" : "false")' @onclick="() => _showChanges = false">Current brief</button>
+                <button class="intake-brief__tab @(_showChanges ? "intake-brief__tab--active" : "")" aria-pressed='@(_showChanges ? "true" : "false")' @onclick="ShowChangesAsync">Changes</button>
+            </div>
+            @if (_showChanges && proposal.Revision > 2)
+            {
+                <label class="intake-brief__revision">
+                    <span>Compare with</span>
+                    <select aria-label="Compare current brief with" value="@_compareRevision" @onchange="CompareRevisionAsync">
+                        @for (var revision = proposal.Revision - 1; revision >= 1; revision--)
+                        {
+                            <option value="@revision">Revision @revision</option>
+                        }
+                    </select>
+                </label>
+            }
+        </div>
+        <div class="intake-brief__document">
+            @if (!_showChanges || proposal.Revision == 1)
+            {
+                @if (_showChanges)
+                {
+                    <p class="page-subtitle">This is the first revision. Review the complete brief below.</p>
+                }
+                <div class="md">@Html(proposal.ApprovedAt is null ? proposal.Body : IntakeBriefReading.BodyWithoutDraftingNote(proposal.Body ?? ""))</div>
+                @if (proposal.ApprovedAt is not null && proposal.Body is { } body && IntakeBriefReading.BodyWithoutDraftingNote(body) != body)
+                {
+                    <details class="intake-brief__source">
+                        <summary>Historical drafting note</summary>
+                        <p class="intake-brief__source-caption">Preserved from the draft. Revision @proposal.Revision is approved.</p>
+                        <blockquote>@IntakeBriefReading.DraftingNote</blockquote>
+                    </details>
+                }
+            }
+            else if (_comparing)
+            {
+                <p role="status">Loading revision @_compareRevision…</p>
+            }
+            else if (_comparisonError is not null)
+            {
+                <p class="banner banner--warning" role="alert">@_comparisonError</p>
+                <button class="btn" @onclick="ShowChangesAsync">Retry comparison</button>
+            }
+            else if (_previous is { } previous)
+            {
+                var visibleChanges = _changes.Where(change => change.Changed && (proposal.ApprovedAt is null || !IntakeBriefReading.IsDraftingNote(change))).ToArray();
+                var fieldChanges = (previous.Title != proposal.Title ? 1 : 0) + (previous.Priority != proposal.Priority ? 1 : 0);
+                var changeCount = visibleChanges.Length + fieldChanges;
+                var onlyAcceptance = fieldChanges == 0 && visibleChanges.Length > 0
+                    && visibleChanges.All(change => change.Ordinal is not null && change.Section.Equals("Acceptance criteria", StringComparison.OrdinalIgnoreCase));
+                <div class="intake-brief__change-summary">
+                    <div>
+                        <h3>What changed</h3>
+                        <p class="intake-brief__change-meta">
+                            <span>Revision @previous.Revision compared with revision @proposal.Revision</span>
+                            <span aria-hidden="true">·</span>
+                            <span class="intake-brief__change-count">@changeCount @(onlyAcceptance ? changeCount == 1 ? "acceptance criterion changed" : "acceptance criteria changed" : changeCount == 1 ? "change" : "changes")</span>
+                        </p>
+                    </div>
+                </div>
+                @if (previous.Title != proposal.Title)
+                {
+                    <section class="intake-brief__edit" aria-label="Title change">
+                        <h4>Title</h4>
+                        <p><del>@previous.Title</del></p>
+                        <p><ins>@proposal.Title</ins></p>
+                    </section>
+                }
+                @if (previous.Priority != proposal.Priority)
+                {
+                    <section class="intake-brief__edit" aria-label="Priority change">
+                        <h4>Priority</h4>
+                        <p><del>Priority @previous.Priority</del> <span aria-hidden="true">→</span> <ins>Priority @proposal.Priority</ins></p>
+                    </section>
+                }
+                @foreach (var group in visibleChanges.GroupBy(change => change.Section))
+                {
+                    <section class="intake-brief__change-group">
+                        <h3>@group.Key</h3>
+                        @foreach (var change in group)
+                        {
+                            <article class="intake-brief__edit">
+                                @if (change.Heading != group.Key)
+                                {
+                                    <h4>
+                                        @if (change.Ordinal is { } ordinal) { <span class="intake-brief__criterion-number">@ordinal.</span> }
+                                        @change.Heading
+                                    </h4>
+                                }
+                                @if (change.Moved) { <p class="intake-brief__movement">Moved within the brief</p> }
+                                @if (IsLongChange(change))
+                                {
+                                    var excerpt = IntakeBriefReading.Excerpt(change);
+                                    <p class="intake-brief__excerpt-label">@(excerpt.Previous ? "From the previous wording" : "From the revised wording")</p>
+                                    <p class="intake-brief__excerpt">@excerpt.Text</p>
+                                    <details class="intake-brief__complete-change">
+                                        <summary>Read the complete change</summary>
+                                        <p class="intake-brief__inline-diff">@foreach (var edit in change.InlineEdits)
+                                            {
+                                                @if (edit.Kind == "added") { <ins>@edit.Text</ins> }
+                                                else if (edit.Kind == "removed") { <del>@edit.Text</del> }
+                                                else { @edit.Text }
+                                            }</p>
+                                        @if (change.HasMarkup) { @RecordedMarkup(change) }
+                                    </details>
+                                }
+                                else if (change.InlineEdits.Count > 0)
+                                {
+                                    <p class="intake-brief__inline-diff">@foreach (var edit in change.InlineEdits)
+                                        {
+                                            @if (edit.Kind == "added") { <ins>@edit.Text</ins> }
+                                            else if (edit.Kind == "removed") { <del>@edit.Text</del> }
+                                            else { @edit.Text }
+                                        }</p>
+                                }
+                                else if (change.Before is null)
+                                {
+                                    <div class="intake-brief__block-add"><span class="intake-brief__edit-label">Added</span><div class="md">@Html(change.After)</div></div>
+                                }
+                                else if (change.After is null)
+                                {
+                                    <div class="intake-brief__block-remove"><span class="intake-brief__edit-label">Removed</span><div class="md">@Html(change.Before)</div></div>
+                                }
+                                else
+                                {
+                                    <div class="md">@Html(change.After)</div>
+                                    @if (change.Before != change.After)
+                                    {
+                                        <details class="intake-brief__previous"><summary>Previous wording</summary><div class="md">@Html(change.Before)</div></details>
+                                    }
+                                }
+                                @if (change.HasMarkup && !IsLongChange(change)) { @RecordedMarkup(change) }
+                            </article>
+                        }
+                    </section>
+                }
+                @if (proposal.ApprovedAt is not null && _changes.Any(change => change.Changed && IntakeBriefReading.IsDraftingNote(change)))
+                {
+                    <details class="intake-brief__source">
+                        <summary>Historical drafting note changed</summary>
+                        <p class="intake-brief__source-caption">Preserved from the draft. Revision @proposal.Revision is approved.</p>
+                        @foreach (var change in _changes.Where(change => change.Changed && IntakeBriefReading.IsDraftingNote(change)))
+                        {
+                            <p class="intake-brief__source-caption">@(change.Before is null ? "Added in this revision" : change.After is null ? "Removed in this revision" : "Updated in this revision")</p>
+                            <blockquote>@(change.After ?? change.Before)</blockquote>
+                        }
+                    </details>
+                }
+                @if (_changes.Any(change => !change.Changed))
+                {
+                    <details class="intake-brief__unchanged">
+                        <summary>@_changes.Count(change => !change.Changed) unchanged passages <span>Show context</span></summary>
+                        @foreach (var group in _changes.Where(change => !change.Changed).GroupBy(change => change.Section))
+                        {
+                            <section class="intake-brief__context">
+                                <h3>@group.Key</h3>
+                                @foreach (var change in group)
+                                {
+                                    @if (change.Heading != group.Key) { <h4>@change.Heading</h4> }
+                                    <div class="md">@Html(change.After)</div>
+                                }
+                            </section>
+                        }
+                    </details>
+                }
+                @if (previous.Title == proposal.Title && previous.Priority == proposal.Priority && previous.Body == proposal.Body)
+                {
+                    <p>No wording or priority changes in this revision.</p>
+                }
+                <details class="intake-brief__source">
+                    <summary>Read complete revision @previous.Revision</summary>
+                    <div class="md">@Html(previous.Body)</div>
+                </details>
+            }
+        </div>
+        @if (proposal.ApprovedAt is null)
+        {
+            <footer class="intake-brief__approval">
+                <div><strong>Ready to send to planning?</strong><p>Approval starts specification, design and technical planning for revision @proposal.Revision.</p></div>
+                <button class="btn btn--primary" disabled="@(_busy || _loading || _stale || proposal.SessionId != SessionId)" @onclick="ApproveAsync">Approve revision @proposal.Revision</button>
+            </footer>
+        }
+    }
+</section>
+
+@code {
+    private static RenderFragment RecordedMarkup(IntakeBriefChange change) => @<details class="intake-brief__previous">
+        <summary>View recorded Markdown</summary>
+        <h5>Previous revision</h5><pre><code>@change.Before</code></pre>
+        <h5>Current revision</h5><pre><code>@change.After</code></pre>
+    </details>;
+}

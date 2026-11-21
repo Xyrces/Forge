@@ -1,0 +1,9 @@
+# Grooming source freshness
+
+Grooming refreshes the owning project's configured checkout before it claims a queued run, records a scheduled Started attempt, or invokes ad-hoc grooming. The composition root resolves the registered project and its GitHub credentials, requires a nonempty registered checkout root, and calls the existing project synchronization seam. A failed refresh stops that pass before model generation or decomposition changes and records an actionable error in the existing project sync status. A later successful refresh clears that error. Other queued projects can still proceed.
+
+This ordering matters for recovery: a transient fetch failure leaves an explicit queued run Queued and a scheduled specification in its prior status. The next normal tick retries repository refresh, without creating a NeedsReview paid attempt or repeating a model request. Ad-hoc grounding uses the same owning project ID for its vision and repository lookup. Operator grooming holds still suppress refresh and generation; acknowledgement of earlier completed work remains separate.
+
+The companion project-sync repair must be integrated with this seam: clean tracked/untracked worktree checks, configured-branch validation, fresh remote fetch, rejection of local-ahead/diverged history, non-destructive fast-forward, and per-checkout serialization. This hook alone does not establish those Git safety guarantees. Existing engineering worktrees and rework are separate from this planning checkout and are not reset by grooming.
+
+Offline regressions exercise queued specifications, scheduled specifications and ad-hoc tasks: the first refresh fails with zero model calls and no started attempt, then a successful refresh occurs before the first model call. This is a source-admission check, not proof that a model's resulting design is correct.

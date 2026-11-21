@@ -15,9 +15,157 @@ public static class TaskSituation
     public sealed record Situation(string Text, string Tone)
     {
         public static readonly Situation None = new("", "info");
+        public string Label { get; init; } = "";
+        public string? NextActor { get; init; }
+        public bool HumanReviewRequired { get; init; }
+        public string? NominatedHuman { get; init; }
+        public string? HumanReviewSummary { get; init; }
     }
 
-    public static Situation Describe(IssueRecord issue)
+    public static Situation Describe(IssueRecord issue, SprintPlan? plan = null, string? nominatedHuman = null)
+    {
+        var held = bool.TryParse(issue.GetMetadata("humanReviewRequired"), out var required) && required;
+        var finished = issue.Status is IssueStatus.Completed or IssueStatus.Closed;
+        var reviewer = finished ? issue.GetMetadata("humanReviewNominee") : nominatedHuman;
+        var merge = issue.Status == IssueStatus.Completed ? ObservedMerge(issue) : null;
+        var reviewSummary = finished && held ? CompletedHumanReview(issue, merge, reviewer) : null;
+        Situation Result(string label, string reason, string? actor = null, string tone = "info") =>
+            new(reason, tone) { Label = label, NextActor = actor, HumanReviewRequired = held, NominatedHuman = reviewer,
+                HumanReviewSummary = reviewSummary };
+        if (ReviewIntegrationState.IsBlocked(issue) && ReviewIntegrationState.IsBudgetDenied(issue, issue.GetMetadata("reviewSha")))
+            return Result("Review paused for budget", issue.GetMetadata("reviewIntegrationError")
+                ?? "Choose Retry review when the request fits the available budget.", "Operator", "action");
+        if (ReviewIntegrationState.IsBlocked(issue))
+            return Result("Review integration needs attention", "Resolve the review connection or verdict problem, then choose Retry review. Saved publication evidence and engineering work are retained.", "Operator", "action");
+        if (issue.Status == IssueStatus.Completed)
+            return plan is not null && Completion.ExistingImplementationEvidence.TryGet(issue, plan, out _)
+                ? Result("Existing implementation verified", "Independent verification and review established the approved behavior at a recorded revision.")
+                : merge is not null
+                ? Result("Merged", "Merge observed. Release and acceptance are tracked with the sprint.")
+                : Result("Completion recorded", issue.GetMetadata("prNumber") is not null
+                    ? "Merge evidence unavailable." : "See the task evidence for the recorded outcome.");
+        if (issue.Status == IssueStatus.Closed) return Result("Closed", "Work is no longer active.");
+        var state = issue.GetMetadata("state");
+        if (issue.Status is IssueStatus.Failed or IssueStatus.Blocked)
+        {
+            var terminal = DescribeLegacy(issue);
+            return terminal with { Label = "Needs attention", NextActor = terminal.Tone == "action" ? "Operator" : "Forge", HumanReviewRequired = held, NominatedHuman = nominatedHuman };
+        }
+        if (state == "ReworkRunning") return Result("Making a requested change", issue.GetMetadata("reworkReason") ?? "The worker is addressing feedback.", "Worker");
+        if (state == "ReworkQueued") return Result("Change queued", issue.GetMetadata("reworkReason") ?? "A worker will address the requested change.", "Worker");
+        if (state == "AgentRunning") return Result("Implementing", "The worker is preparing and verifying the change.", "Worker");
+        var humanPending = bool.TryParse(issue.GetMetadata("reviewHumanPending"), out var pending) && pending;
+        var humanActor = nominatedHuman is null ? "Human reviewer" : "@" + nominatedHuman;
+        var humanRequirement = nominatedHuman is null ? "Forge also requires human review."
+            : $"Forge also requires review by @{nominatedHuman}.";
+        var protection = issue.GetMetadata("reviewProtectionDecision");
+        var openThreads = int.TryParse(issue.GetMetadata("reviewUnresolvedThreads"), out var count) ? count : 0;
+        var threadSummary = openThreads switch
+        {
+            1 => "1 review conversation is open.",
+            > 1 => $"{openThreads} review conversations are open.",
+            _ => "",
+        };
+        var alsoThreads = openThreads > 0 ? " " + threadSummary : "";
+        if (protection != "ChangesRequested" && bool.TryParse(issue.GetMetadata("reviewHumanProvenancePending"), out var unverifiedHuman) && unverifiedHuman)
+            return Result("Fresh approval required",
+                "Forge could not verify which revision the earlier approval covered. Review the current revision on GitHub and submit a fresh approval." + alsoThreads,
+                humanActor, "action");
+        if (protection != "ChangesRequested" && bool.TryParse(issue.GetMetadata("reviewAutomatedProvenancePending"), out var unverifiedAutomated) && unverifiedAutomated)
+            return Result("Fresh automated review required",
+                "Forge is waiting for its reviewer to verify the current revision." + alsoThreads, "Forge reviewer");
+        if (openThreads > 0 && int.TryParse(issue.GetMetadata("reviewConversationInputLimited"), out var limited) && limited > 0)
+            return Result("Review discussion needs a participant",
+                "A complete discussion exceeded Forge's review input limit. Review the conversation on GitHub and resolve it when satisfied.",
+                "PR participants", "action");
+        if (bool.TryParse(issue.GetMetadata("awaitingHumanReview"), out var waiting) && waiting
+            && (humanPending || openThreads == 0 || protection is "ReviewRequired" or "ChangesRequested"))
+        {
+            if (protection is "ReviewRequired" or "ChangesRequested")
+                return Result(protection == "ChangesRequested" ? "GitHub changes requested" : "GitHub approval required",
+                    (protection == "ChangesRequested"
+                        ? "GitHub still reports requested changes. Address the review and obtain an eligible approval of the current revision before merge."
+                        : "GitHub branch protection still requires an eligible approval of this revision.")
+                    + (humanPending ? " " + humanRequirement : "") + alsoThreads,
+                    humanPending ? humanActor : "Eligible GitHub reviewer", "action");
+            return Result("Waiting for human review", "Review the current PR revision before merge."
+                + (protection == "Unavailable" ? " GitHub’s protected review check is also temporarily unavailable; Forge will retry it." : "") + alsoThreads, humanActor, "action");
+        }
+        if (protection == "Unavailable")
+            return Result("Review check unavailable", "Forge cannot yet confirm GitHub’s protected review requirement. It will retry the read before merging."
+                + (humanPending ? " " + humanRequirement : ""), humanPending ? humanActor : "Forge", "warn");
+        if (issue.Status == IssueStatus.Pending)
+            return Result("Queued", issue.GetMetadata("reworkReason") ?? "Waiting for an available worker.", "Worker");
+        if (openThreads > 0)
+        {
+            if (int.TryParse(issue.GetMetadata("reviewHumanThreads"), out var humanThreads) && humanThreads == 0)
+                return Result("Review conversations open", threadSummary + " Forge checks the correction before resolving its finding.", "Forge reviewer");
+            return Result("Review conversations open", threadSummary + " Open the PR to check the outstanding feedback and resolve the conversation when addressed.", "PR participants", "action");
+        }
+        switch (issue.GetMetadata("reviewMergeState"))
+        {
+            case "BEHIND":
+                return Result("Branch update required", "The PR branch is behind its base. Forge rechecks the updated revision before merge.", "Forge");
+            case "DIRTY":
+                return Result("Merge conflict", "The PR conflicts with its base. The conflicting changes need to be reconciled before merge.", "Forge");
+            case "DRAFT":
+                return Result("Draft pull request", "Mark the PR ready for review on GitHub when the work is ready.", "PR author", "action");
+            case "BLOCKED":
+                return Result("GitHub merge requirement pending", "Open the PR merge box for the outstanding requirement. Forge rechecks it before merging.", "PR participants", "action");
+            case "UNKNOWN" or "Unavailable":
+                return Result("Checking merge requirements", "Forge is waiting for GitHub to confirm whether this revision can merge.", "Forge", "warn");
+        }
+        if (issue.GetMetadata("reviewProtectionHead") is { Length: > 0 } head
+            && head == issue.GetMetadata("reviewMergeRefusedHead")
+            && issue.GetMetadata("reviewMergeRefusedReason") is { Length: > 0 } reason)
+            return Result("GitHub declined the merge", reason, "PR participants", "action");
+        if (state == "MergeReady") return Result("Final merge checks", "Forge is checking review, CI and merge requirements.", "Forge");
+        var legacy = DescribeLegacy(issue);
+        return legacy with { Label = issue.Status is IssueStatus.Blocked or IssueStatus.Failed ? "Needs attention" : "In progress",
+            NextActor = legacy.Tone == "action" ? "Operator" : "Forge", HumanReviewRequired = held, NominatedHuman = nominatedHuman };
+    }
+
+    private static string CompletedHumanReview(IssueRecord issue, Completion.ObservedMergeEvidence? merge, string? reviewer)
+    {
+        const string noAction = "No further review action.";
+        if (merge is null) return noAction;
+        // A valid merge receipt already establishes that the immutable row contains
+        // a JSON object. Read its review snapshot once, including legacy string values.
+        using var snapshot = System.Text.Json.JsonDocument.Parse(issue.MetadataJson);
+        string? Field(string key) => snapshot.RootElement.TryGetProperty(key, out var value)
+            && value.ValueKind != System.Text.Json.JsonValueKind.Null ? value.ToString() : null;
+        bool RecordedFalse(string key) => bool.TryParse(Field(key), out var value) && !value;
+        // The last observed gate is a pre-merge decision. An external merge, an
+        // unsynchronized hold edit, or a different revision cannot prove approval.
+        if (Field("lastEvent") != "Merged" || Field("reviewProtectionHead") != merge.HeadSha
+            || Field("reviewProtectionDecision") is not ("Approved" or "NotRequired")
+            || !RecordedFalse("reviewHumanPending") || !RecordedFalse("reviewHumanProvenancePending")
+            || !RecordedFalse("humanReviewSyncPending") || !RecordedFalse("awaitingHumanReview")
+            || !int.TryParse(Field("reviewUnresolvedThreads"), out var threads) || threads != 0
+            || !string.IsNullOrEmpty(Field("reviewGateError")))
+            return noAction;
+        return string.IsNullOrWhiteSpace(reviewer)
+            ? "Human review approved. " + noAction
+            : $"Approved by @{reviewer}. " + noAction;
+    }
+
+    public static bool HasObservedMerge(IssueRecord issue) => ObservedMerge(issue) is not null;
+
+    private static Completion.ObservedMergeEvidence? ObservedMerge(IssueRecord issue)
+    {
+        try
+        {
+            var evidence = System.Text.Json.JsonSerializer.Deserialize<Completion.ObservedMergeEvidence>(issue.GetMetadata("observedMerge") ?? "null");
+            return evidence is not null && evidence.TaskId == issue.Id
+                && int.TryParse(issue.GetMetadata("prNumber"), out var pr) && evidence.PullRequestNumber == pr
+                && System.Text.RegularExpressions.Regex.IsMatch(evidence.MergeSha ?? "", "^[a-fA-F0-9]{40}$")
+                && System.Text.RegularExpressions.Regex.IsMatch(evidence.HeadSha ?? "", "^[a-fA-F0-9]{40}$")
+                ? evidence : null;
+        }
+        catch (System.Text.Json.JsonException) { return null; }
+    }
+
+    private static Situation DescribeLegacy(IssueRecord issue)
     {
         var state = issue.GetMetadata("state");
         var err = issue.GetMetadata("lastError") ?? "";
@@ -39,10 +187,10 @@ public static class TaskSituation
                     var why = (issue.GetMetadata("reworkReason") ?? "").Contains("conflict", StringComparison.OrdinalIgnoreCase)
                         ? "conflict syncs"
                         : "rework rounds";
-                    return new Situation($"circuit breaker · {why} ×3 exhausted — clear strikes to retry", "action");
+                    return new Situation($"Automatic {why} stopped at the configured retry limit. Review the history before retrying.", "action");
                 }
                 if (err.Contains("conflict", StringComparison.OrdinalIgnoreCase))
-                    return new Situation("PR conflicts with base · sync round needed — clear strikes to retry", "action");
+                    return new Situation("The PR conflicts with its base branch. Review the conflict before retrying.", "action");
                 return new Situation("blocked · operator review required", "action");
 
             case IssueStatus.Pending:
@@ -64,7 +212,8 @@ public static class TaskSituation
                     case "AgentRunning" or "ReworkRunning":
                         return new Situation("agent running", "info");
                     case "MergeReady":
-                        return new Situation("approved + CI green · merging", "info");
+                        // Either ReviewApproved or CiGreen can enter this state; the watcher still checks both and the merge gate.
+                        return new Situation("awaiting final merge checks", "info");
                     case "ParkedInfra":
                         return new Situation("parked · base-branch CI red, waits for recovery", "warn");
                     case "PROpen":
@@ -90,23 +239,23 @@ public static class TaskSituation
     private static string ClassifyFailure(string err)
     {
         if (err.Contains("pre-push hygiene", StringComparison.OrdinalIgnoreCase))
-            return "push hygiene: junk/oversized files — clean up, reset & requeue";
+            return "push hygiene: junk/oversized files — clean up, review and retry";
         if (err.Contains("pre-push verification", StringComparison.OrdinalIgnoreCase))
-            return "pre-push build/tests failed — reset & requeue for another fix round";
+            return "pre-push build/tests failed — review and retry for another fix round";
         if (err.Contains("429", StringComparison.OrdinalIgnoreCase)
             || err.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
             || err.Contains("overloaded", StringComparison.OrdinalIgnoreCase))
-            return "LLM rate-limited mid-run (transient) — reset & requeue";
+            return "LLM rate-limited mid-run (transient) — review and retry";
         if (err.Contains("tool_calls", StringComparison.OrdinalIgnoreCase))
-            return "provider protocol error (transient) — reset & requeue";
+            return "provider protocol error (transient) — review and retry";
         if (err.Contains("PK__issue", StringComparison.OrdinalIgnoreCase)
             || err.Contains("SqlException", StringComparison.OrdinalIgnoreCase))
-            return "store fault — reset & requeue";
+            return "store fault — review and retry";
         if (err.Contains("pr-stale", StringComparison.OrdinalIgnoreCase))
-            return "watch went stale — reset & requeue restarts the window";
+            return "watch went stale — review and retry restarts the window";
         if (err.Contains("circuit breaker", StringComparison.OrdinalIgnoreCase)
             || err.Contains("max rework", StringComparison.OrdinalIgnoreCase))
-            return "circuit breaker — clear strikes to retry";
+            return "Automatic recovery reached its retry limit. Review the history before retrying.";
         var first = err.Split('\n', 2)[0];
         return first.Length == 0 ? "failed" : $"failed: {first[..Math.Min(70, first.Length)]}";
     }

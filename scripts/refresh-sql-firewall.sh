@@ -10,9 +10,9 @@
 # retry layer rides out a stale rule until the next refresh).
 set -u
 
-SERVER="forge-sql-server"
-RESOURCE_GROUP="forge"
-RULE_NAME="forge-dev-machine"
+SERVER="${FORGE_SQL_SERVER:?Set FORGE_SQL_SERVER to the Azure SQL server name}"
+RESOURCE_GROUP="${FORGE_SQL_RESOURCE_GROUP:?Set FORGE_SQL_RESOURCE_GROUP}"
+RULE_NAME="${FORGE_SQL_FIREWALL_RULE:?Set FORGE_SQL_FIREWALL_RULE}"
 DB_RESOURCE="https://database.windows.net"
 
 log() { logger -t forge-sql-firewall -- "$1" 2>/dev/null || echo "$1"; }

@@ -6,7 +6,7 @@ using Talaria.Core.Abstractions;
 namespace Forge.Orchestrator.Consumers;
 
 /// <summary>
-/// SweepTick → the 15-minute backstop. Watch ticks run the sequential
+/// SweepTick → watch polling each minute and the 15-minute planning backstop. Watch ticks run the sequential
 /// sweep inline (bounded GitHub polls; reviews launch off-loop);
 /// groom/design/artist/assemble ticks kick the owning scheduler's
 /// wakeup (TickAsync re-derives everything from DB truth).
@@ -69,6 +69,9 @@ public sealed class SpecStatusChangedConsumer : EventConsumer<SpecStatusChanged>
         _wakeups.Groom.Signal();
         _wakeups.Design.Signal();
         _wakeups.Artist.Signal();
+        // Groomed tasks may have been enqueued while their spec was still
+        // Approved. Wake again at the actual eligibility boundary.
+        if (evt.ToStatus == nameof(Core.SpecStatus.Groomed)) _wakeups.Assemble.Signal();
         return Task.CompletedTask;
     }
 }

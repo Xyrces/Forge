@@ -35,11 +35,16 @@ public class ReviewerDispatcherTests : IDisposable
 
     private sealed class FakeGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public int CommentCalls;
         public (string Base, string Head)? CompareCall;
         public FakeGitHub() : base("o", "r", null) { }
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult(new PullRequest(number));
+        public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
+            => Task.FromResult(CommitState.Success);
+        public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int prNumber, CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<PullRequestReview>>(Array.Empty<PullRequestReview>());
         public override Task<string> GetPullRequestDiffAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult("diff --git a/F.cs b/F.cs\n+added");
         public override Task<string> GetCompareDiffAsync(string baseSha, string headSha, CancellationToken cancellationToken = default)
@@ -95,6 +100,180 @@ public class ReviewerDispatcherTests : IDisposable
     }
 
     [Fact]
+    public async Task Distributed_OverlappingCallersShareOneLogicalInvocation()
+    {
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var jobs = new ReviewTestJobs(store);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        jobs.OnCreate = async a => { started.SetResult(); await finish.Task; await jobs.Finish(a, "REVIEWER_VERDICT: APPROVE"); };
+        var task = await SeedWatchAsync();
+        ReviewerDispatcher NewDispatcher() => new(_issues, new FakeGitHub(),
+            new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset"),
+            NullLogger<ReviewerDispatcher>.Instance, projectId: "forge");
+        var first = NewDispatcher().ReviewOnceAsync(task, headShaOverride: _ => "abc123");
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var second = NewDispatcher().ReviewOnceAsync(task, headShaOverride: _ => "abc123");
+        Assert.False(second.IsCompleted);
+        Assert.Single(jobs.Created);
+        finish.SetResult();
+        Assert.Equal(ReviewerVerdict.Approve, (await first)!.Verdict);
+        Assert.Null(await second);
+        Assert.Single(jobs.Created);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Distributed_ExternalHeadUsesSeparatePinnedCheckoutAndAdoptsItAfterControllerInterruption(bool missingEngineering, bool terminal)
+    {
+        async Task<string> Git(params string[] args)
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("git")
+            {
+                WorkingDirectory = _workDir, RedirectStandardOutput = true,
+                RedirectStandardError = true, UseShellExecute = false
+            };
+            foreach (var arg in args) start.ArgumentList.Add(arg);
+            using var process = System.Diagnostics.Process.Start(start)!;
+            var output = process.StandardOutput.ReadToEndAsync();
+            var error = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            Assert.True(process.ExitCode == 0, await error);
+            return (await output).Trim();
+        }
+        await Git("init", "-b", "main");
+        await Git("config", "user.name", "Test");
+        await Git("config", "user.email", "test@example.com");
+        await File.WriteAllTextAsync(Path.Combine(_workDir, "code.txt"), "first");
+        await Git("add", "code.txt");
+        await Git("commit", "-m", "first");
+        var oldHead = await Git("rev-parse", "HEAD");
+        var service = new Forge.AgentTools.GitWorktreeService(
+            new Forge.Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+            NullLogger<Forge.AgentTools.GitWorktreeService>.Instance);
+        var engineering = await service.CreateAsync("engineering", "main");
+        await File.WriteAllTextAsync(Path.Combine(engineering, "code.txt"), "uncommitted");
+        await File.WriteAllTextAsync(Path.Combine(_workDir, "code.txt"), "external head");
+        await Git("add", "code.txt");
+        await Git("commit", "-m", "external");
+        var head = await Git("rev-parse", "HEAD");
+        await Git("remote", "add", "origin", _workDir);
+        var task = await SeedWatchAsync();
+        await _issues.TransitionAsync(task.Id, task.Status, "engineering checkout", new Dictionary<string, object>
+        { ["worktreePath"] = missingEngineering ? Path.Combine(_workDir, "missing-engineering") : engineering });
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var jobs = new ReviewTestJobs(store);
+        jobs.OnCreate = async a =>
+        {
+            Assert.NotEqual(engineering, a.WorktreePath);
+            Assert.Equal(head, a.SourceSha);
+            Assert.Equal(head, await Forge.Orchestrator.Workers.KubernetesAgentRunner.ReadHeadAsync(a.WorktreePath, CancellationToken.None));
+            if (terminal) await jobs.Finish(a, "REVIEWER_VERDICT: APPROVE");
+            throw new OperationCanceledException("controller detached after worker result");
+        };
+        ReviewerDispatcher Dispatcher() => new(_issues, new FakeGitHub(),
+            new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset"),
+            NullLogger<ReviewerDispatcher>.Instance, projectId: "forge", worktrees: service);
+        Assert.Null(await Dispatcher().ReviewOnceAsync(task, headShaOverride: _ => head));
+        var snapshot = jobs.Created.Single().WorktreePath;
+        Assert.True(Directory.Exists(snapshot)); // terminal result is not yet consumed; adoption still needs it
+        Assert.Equal(snapshot, (await _issues.GetAsync(task.Id))!.GetMetadata("reviewSnapshotPath"));
+        if (missingEngineering) // upgrade from a detached worker created before snapshot tracking
+            await _issues.PatchReviewMetadataAsync(task.Id, new Dictionary<string, object>
+            { ["reviewSnapshotPath"] = null!, ["reviewSnapshotWorkerId"] = null! }, null, CancellationToken.None);
+        jobs.OnObserve = _ => jobs.Finish(jobs.Created[0], "REVIEWER_VERDICT: APPROVE");
+        Assert.Equal(ReviewerVerdict.Approve, (await Dispatcher().ReviewOnceAsync(task, headShaOverride: _ => head))!.Verdict);
+        Assert.Single(jobs.Created);
+        Assert.False(Directory.Exists(snapshot));
+        Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reviewSnapshotPath"));
+        Assert.Equal(oldHead, await service.GetHeadShaAsync(engineering));
+        Assert.Equal("uncommitted", await File.ReadAllTextAsync(Path.Combine(engineering, "code.txt")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Distributed_LegacyAssignmentCannotOverlapFreshWorker(bool terminal)
+    {
+        var task = await SeedWatchAsync();
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var legacy = new Forge.Core.Execution.WorkerAssignment("legacy", "dataset", "old-prompt-hash", "forge", task.Id,
+            "Reviewer", "old-dispatch", "abc123", _workDir, "{}", "token");
+        await store.CreateOrGetAsync(legacy);
+        if (terminal) await store.MarkJobFailedAsync("legacy", "pod termination unconfirmed");
+        var jobs = new ReviewTestJobs(store);
+        jobs.OnJoin = _ => throw new InvalidOperationException("old pod still exists");
+        var dispatcher = new ReviewerDispatcher(_issues, new FakeGitHub(),
+            new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset"),
+            NullLogger<ReviewerDispatcher>.Instance, projectId: "forge");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "abc123"));
+        Assert.Empty(jobs.Created);
+        Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reviewWorkerId"));
+        if (terminal)
+        {
+            jobs.OnJoin = _ => { };
+            jobs.OnCreate = a => jobs.Finish(a, "REVIEWER_VERDICT: APPROVE");
+            Assert.Equal(ReviewerVerdict.Approve,
+                (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "abc123"))!.Verdict);
+            Assert.Contains("legacy", jobs.Joined);
+            Assert.Single(jobs.Created);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Distributed_TerminalRejectedAttemptCreatesFreshWorker_AndSuccessDedupes(bool failure)
+    {
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var jobs = new ReviewTestJobs(store);
+        jobs.OnCreate = a => jobs.Created.Count == 1
+            ? jobs.Finish(a, "", failure ? "infra failed" : null)
+            : jobs.Finish(a, "REVIEWER_VERDICT: APPROVE");
+        var runner = new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset");
+        var dispatcher = new ReviewerDispatcher(_issues, new FakeGitHub(), runner,
+            NullLogger<ReviewerDispatcher>.Instance, projectId: "forge");
+        var task = await SeedWatchAsync();
+        var first = await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "abc123");
+        Assert.Equal(ReviewerVerdict.Error, first!.Verdict);
+        var second = await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "abc123");
+        Assert.Equal(ReviewerVerdict.Approve, second!.Verdict);
+        Assert.Equal(2, jobs.Created.Count);
+        Assert.NotEqual(jobs.Created[0].DispatchId, jobs.Created[1].DispatchId);
+        Assert.Contains(jobs.Created[0].Id, jobs.Joined);
+        Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "abc123"));
+        Assert.Equal(2, jobs.Created.Count);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Distributed_InterruptedCallerAdoptsSameWorker_IncludingResultBeforeVerdict(bool terminal)
+    {
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var jobs = new ReviewTestJobs(store);
+        jobs.OnCreate = async a =>
+        {
+            if (terminal) await jobs.Finish(a, "REVIEWER_VERDICT: APPROVE");
+            throw new OperationCanceledException("controller wait detached");
+        };
+        var task = await SeedWatchAsync();
+        ReviewerDispatcher NewDispatcher() => new(_issues, new FakeGitHub(),
+            new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset"),
+            NullLogger<ReviewerDispatcher>.Instance, projectId: "forge");
+        Assert.Null(await NewDispatcher().ReviewOnceAsync(task, headShaOverride: _ => "abc123"));
+        Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reviewRound"));
+        jobs.OnObserve = _ => jobs.Finish(jobs.Created[0], "REVIEWER_VERDICT: APPROVE");
+        var result = await NewDispatcher().ReviewOnceAsync(task, headShaOverride: _ => "abc123");
+        Assert.Equal(ReviewerVerdict.Approve, result!.Verdict);
+        Assert.Single(jobs.Created);
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("reviewRound"));
+    }
+
+    [Fact]
     public async Task ReviewOnce_RecordsVerdictInWatchMetadata()
     {
         var gh = new FakeGitHub();
@@ -110,7 +289,7 @@ public class ReviewerDispatcherTests : IDisposable
         Assert.Equal("Approve", after.GetMetadata("reviewVerdict"));
         Assert.Equal("1", after.GetMetadata("reviewRound"));
         Assert.NotNull(after.GetMetadata("reviewSha"));
-        Assert.Equal(1, gh.CommentCalls);
+        Assert.Equal(0, gh.CommentCalls); // Formal review is the single audit; no monolithic issue comment.
     }
 
     [Fact]

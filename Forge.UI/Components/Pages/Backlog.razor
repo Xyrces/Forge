@@ -1,3 +1,4 @@
+@using Forge.Dashboard.Services
 @page "/backlog"
 @inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
@@ -51,7 +52,8 @@
                 <div class="banner banner--error"><span>@_createError</span></div>
             }
             <p class="hint" style="margin-top:8px">
-                Created as type <code>task</code> for <strong>@ShellStore.Value.CurrentProjectId</strong> — the dispatch loop claims it next cycle.
+                Created for <strong>@ShellStore.Value.CurrentProjectId</strong>. Technical grooming comes first, then sprint selection when eligible. Held workflow stages can pause progress.
+                For a new initiative, <a href="/intake">start in Intake</a>.
             </p>
         </div>
     }
@@ -153,7 +155,7 @@
     private string? _repoUrl;
 
     private string? PrUrl(string prNumber) =>
-        _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+        RepositoryLinks.PullRequest(_repoUrl, prNumber);
 
     private async Task LoadRepoUrlAsync()
     {
@@ -169,7 +171,8 @@
                 if (p.TryGetProperty("id", out var id) && string.Equals(id.GetString(), projectId, StringComparison.OrdinalIgnoreCase)
                     && p.TryGetProperty("repoUrl", out var url))
                 {
-                    _repoUrl = url.GetString()?.TrimEnd('/');
+                    if (projectId == ShellStore.Value.CurrentProjectId)
+                        _repoUrl = RepositoryLinks.WebUrl(url.GetString());
                     break;
                 }
             }

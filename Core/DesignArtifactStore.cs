@@ -48,7 +48,13 @@ public sealed class DesignArtifactStore
 
     private string T(string name) => _db.Dialect.Table(name);
 
+    internal bool UsesDatabase(IDbConnectionFactory db) => _db.Provider == db.Provider && _db.Qualifier == db.Qualifier
+        && _db.ConnectionString == db.ConnectionString;
+
     public string DbPath => _dbPath;
+
+    internal Task<IReadOnlyList<ArtifactReference>> ListReferencesAsync(string specId, CancellationToken ct) =>
+        ArtifactReferenceIndex.ReadAsync(_db, "design_artifact", specId, ct);
 
     public async Task<DesignArtifact> CreateAsync(NewDesignArtifact req, CancellationToken ct = default)
     {
@@ -116,7 +122,7 @@ public sealed class DesignArtifactStore
                        references_json, parent_artifact_id, status, author, created_at, updated_at
                 FROM {T("design_artifact")}
                 WHERE spec_id = @spec
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 """;
         }
         else
@@ -126,7 +132,7 @@ public sealed class DesignArtifactStore
                        references_json, parent_artifact_id, status, author, created_at, updated_at
                 FROM {T("design_artifact")}
                 WHERE spec_id = @spec AND status = @status
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 """;
             cmd.AddParam("@status", status.Value.ToString().ToLowerInvariant());
         }
@@ -149,13 +155,39 @@ public sealed class DesignArtifactStore
             FROM {T("design_artifact")} da
             JOIN {T("spec")} s ON s.id = da.spec_id
             WHERE s.project_id = @project
-            ORDER BY da.created_at ASC
+            ORDER BY da.created_at ASC, da.id ASC
             """;
         cmd.AddParam("@project", projectId);
         var list = new List<DesignArtifact>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(ReadRow(rd));
         return list;
+    }
+
+    /// <summary>Read historical artifacts whose owning specs live in another project database.</summary>
+    internal async Task<IReadOnlyList<DesignArtifact>> ListBySpecsAsync(
+        IReadOnlyList<string> specIds, CancellationToken ct = default)
+    {
+        var list = new List<DesignArtifact>();
+        if (specIds.Count == 0) return list;
+        await using var conn = await _db.OpenAsync(ct);
+        // Keep below both providers' parameter limits without issuing a query per spec.
+        foreach (var batch in specIds.Distinct(StringComparer.Ordinal).Chunk(500))
+        {
+            await using var cmd = conn.CreateCommand();
+            var parameters = batch.Select((id, index) => (Name: $"@spec{index}", Id: id)).ToArray();
+            cmd.CommandText = $"""
+                SELECT id, spec_id, kind, title, body, body_kind,
+                       references_json, parent_artifact_id, status, author, created_at, updated_at
+                FROM {T("design_artifact")}
+                WHERE spec_id IN ({string.Join(",", parameters.Select(p => p.Name))})
+                ORDER BY created_at ASC, id ASC
+                """;
+            foreach (var parameter in parameters) cmd.AddParam(parameter.Name, parameter.Id);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) list.Add(ReadRow(reader));
+        }
+        return list.OrderBy(a => a.CreatedAt).ThenBy(a => a.Id, StringComparer.Ordinal).ToArray();
     }
 
     public async Task<int> DeleteBySpecAsync(string specId, CancellationToken ct = default)

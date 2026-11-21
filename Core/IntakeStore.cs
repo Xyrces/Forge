@@ -216,9 +216,16 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
 
         await using (var upd = conn.CreateCommand())
         {
-            upd.CommandText = $"""UPDATE {T("intake_session")} SET updated_at = @now WHERE id = @id""";
+            upd.CommandText = $"""
+                UPDATE {T("intake_session")} SET updated_at = @now,
+                    title = CASE WHEN title IN ('New intake','New session') AND @proposalTitle IS NOT NULL
+                        THEN @proposalTitle ELSE title END
+                WHERE id = @id
+                """;
             upd.AddParam("@now", IssueStore.DateFormatTime(now));
             upd.AddParam("@id", sessionId);
+            var proposalTitle = message.ProposedEpicTitle?.Trim();
+            upd.AddParam("@proposalTitle", string.IsNullOrEmpty(proposalTitle) ? DBNull.Value : proposalTitle[..Math.Min(160, proposalTitle.Length)]);
             await upd.ExecuteNonQueryAsync(ct);
         }
 

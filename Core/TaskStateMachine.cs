@@ -31,6 +31,8 @@ public enum TaskEvent
     OperatorBlocked,
     OperatorClosed,
     WatchResumed,
+    OperatorAdoptPr,
+    EmptyPrRetired,
 }
 
 /// <summary>
@@ -72,6 +74,15 @@ public sealed class TaskStateMachine
     /// always legal (idempotent re-observation).</summary>
     private static readonly IReadOnlyDictionary<(TaskEvent, TaskLifecycleState), TaskLifecycleState> Table =
         BuildTable();
+
+    internal static Dictionary<string, object> ObservedMetadata(IssueRecord task, TaskEvent evt, DateTime now)
+    {
+        var current = Enum.TryParse<TaskLifecycleState>(task.GetMetadata("state"), out var recorded)
+            ? recorded : TaskStateProjector.Derive(task, null, false, now).State;
+        if (!Table.TryGetValue((evt, current), out var next))
+            throw new InvalidOperationException($"Illegal lifecycle observation {current}+{evt}.");
+        return new() { ["state"] = next.ToString(), ["stateEnteredAt"] = now.ToString("O"), ["lastEvent"] = evt.ToString() };
+    }
 
     private static IReadOnlyDictionary<(TaskEvent, TaskLifecycleState), TaskLifecycleState> BuildTable()
     {
@@ -194,6 +205,8 @@ public sealed class TaskStateMachine
             TaskLifecycleState.StalledRework, TaskLifecycleState.ParkedInfra,
             TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady);
         Add(TaskEvent.OperatorBlocked, TaskLifecycleState.BlockedOperator, working);
+        Add(TaskEvent.EmptyPrRetired, TaskLifecycleState.Pending,
+            working.Append(TaskLifecycleState.BlockedOperator).ToArray());
         // Operator close-obsolete (2026-08-01): the operator retires
         // a task outright (work already on main via another task,
         // superseded, won't-fix) from ANY live or failed state. The
@@ -223,6 +236,9 @@ public sealed class TaskStateMachine
         // stateViolation on the first auto-resume).
         Add(TaskEvent.WatchResumed, TaskLifecycleState.PROpen,
             TaskLifecycleState.BlockedOperator, TaskLifecycleState.PROpen);
+        // Only an explicit operator command with a verified open PR may revive failed work.
+        Add(TaskEvent.OperatorAdoptPr, TaskLifecycleState.PROpen,
+            working.Append(TaskLifecycleState.Failed).Append(TaskLifecycleState.BlockedOperator).ToArray());
         return t;
     }
 
@@ -246,7 +262,8 @@ public sealed class TaskStateMachine
         IssueRecord? watch,
         bool hasActiveDevRun,
         CancellationToken ct,
-        IReadOnlyDictionary<string, object>? extraMetadata = null)
+        IReadOnlyDictionary<string, object>? extraMetadata = null,
+        IssueStatus? issueStatus = null)
     {
         var now = DateTime.UtcNow;
         // Authority semantics (Phase 3): the machine's own recorded
@@ -289,7 +306,7 @@ public sealed class TaskStateMachine
         {
             foreach (var kv in extraMetadata) metadata[kv.Key] = kv.Value;
         }
-        await issues.TransitionAsync(task.Id, task.Status, error: null, metadata: metadata, ct: ct);
+        await issues.TransitionAsync(task.Id, issueStatus ?? task.Status, error: null, metadata: metadata, ct: ct);
         return next;
     }
 }

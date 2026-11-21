@@ -20,17 +20,20 @@ public sealed class ScheduledWatchdog
     private readonly IDashboardEventBus _events;
     private readonly ILogger<ScheduledWatchdog> _logger;
     private readonly Core.TaskStateMachine? _lifecycle;
+    private readonly Func<string, string, CancellationToken, Task<bool>>? _hasDurableWorker;
 
     public ScheduledWatchdog(
         ProjectContextFactory projects,
         IDashboardEventBus events,
         ILogger<ScheduledWatchdog> logger,
-        Core.TaskStateMachine? lifecycle = null)
+        Core.TaskStateMachine? lifecycle = null,
+        Func<string, string, CancellationToken, Task<bool>>? hasDurableWorker = null)
     {
         _projects = projects;
         _events = events;
         _logger = logger;
         _lifecycle = lifecycle;
+        _hasDurableWorker = hasDurableWorker;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -104,18 +107,22 @@ public sealed class ScheduledWatchdog
         // (observed live 2026-08-01: 4 reviewer rows, up to 9h old,
         // masking their tasks). 20-minute heartbeat staleness: the
         // runner heartbeats after every model response; the longest
-        // legitimate silence is a slow single round-trip.
+        // legitimate local silence is a slow single round-trip. Durable
+        // workers remain owned throughout long verification and controller restarts.
         var runStore = new Core.AgentRunStore(((Core.IssueStore)issues).Db);
         var zombies = await runStore.FailZombieRunsAsync(
             DateTime.UtcNow - TimeSpan.FromMinutes(20),
-            "zombie run reaped: heartbeat stale > 20m (process died or run wedged)", ct);
+            "zombie run reaped: heartbeat stale > 20m without durable worker", ct,
+            _hasDurableWorker is null ? null : (run, token) => run.TaskId is null
+                ? Task.FromResult(false) : _hasDurableWorker(run.ProjectId ?? projectId, run.TaskId, token));
         foreach (var id in zombies)
         {
             _logger.LogWarning("Watchdog ({Project}): closed zombie agent run {RunId}", projectId, id);
         }
 
         var reaped = await Core.OrphanedClaimReaper.ReapAsync(
-            issues, runStore, DateTime.UtcNow, ct: ct);
+            issues, runStore, DateTime.UtcNow, ct: ct,
+            hasDurableWorker: _hasDurableWorker is null ? null : (id, token) => _hasDurableWorker(projectId, id, token));
         foreach (var id in reaped)
         {
             _logger.LogWarning("Watchdog ({Project}): requeued orphaned claim {TaskId}", projectId, id);

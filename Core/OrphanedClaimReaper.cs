@@ -32,7 +32,8 @@ public static class OrphanedClaimReaper
     /// <summary>Requeue orphaned claims. Returns the requeued ids.</summary>
     public static async Task<IReadOnlyList<string>> ReapAsync(
         IIssueStore issues, AgentRunStore runs, DateTime utcNow,
-        TimeSpan? orphanAfter = null, CancellationToken ct = default)
+        TimeSpan? orphanAfter = null, CancellationToken ct = default,
+        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null)
     {
         var threshold = orphanAfter ?? DefaultOrphanAfter;
         var activeTaskIds = (await runs.ListActiveAsync(ct))
@@ -49,6 +50,8 @@ public static class OrphanedClaimReaper
             if (activeTaskIds.Contains(i.Id)) continue;           // genuinely running
             if (utcNow - i.UpdatedAt < threshold) continue;       // give the claim time to start its run
             if (i.RecoveryAttempts >= MaxReapAttempts) continue;  // budget exhausted — the watchdog's starvation finding alerts instead
+
+            if (hasDurableWorker is not null && await hasDurableWorker(i.Id, ct)) continue;
 
             await issues.IncrementRecoveryAttemptsAsync(i.Id, ct);
             await issues.TransitionAsync(i.Id, IssueStatus.Pending,

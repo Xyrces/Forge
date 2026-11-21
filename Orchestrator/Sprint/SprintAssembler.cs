@@ -1,3 +1,4 @@
+using Forge.Core.Initiatives;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Forge.Core;
@@ -22,7 +23,7 @@ namespace Forge.Orchestrator.Sprint;
     /// without grooming (operator rule, 2026-07-23).</item>
 /// <item>The next sprint is assembled at the completion of the
 /// last: when every task linked to the Active sprint is terminal
-/// (Completed | Failed | Closed), the sprint is marked Completed
+/// (Completed | Closed), the sprint is marked Completed
 /// and the next one is assembled immediately.</item>
 /// <item>Exactly one Active sprint per project. Dispatch only
 /// claims tasks in the Active sprint (the gate lives in
@@ -68,8 +69,19 @@ public sealed class SprintAssembler
         Core.IFollowUpTriage? followUpTriage = null,
         WakeupSignal? wakeup = null,
         Core.Messaging.IEventPublisher? eventPublisher = null,
-        TimeSpan? failureAgingWindow = null)
+        // Compatibility only: elapsed time never clears Failed work.
+        TimeSpan? failureAgingWindow = null,
+        InitiativeProposalStore? initiativeProposals = null,
+        Func<string, bool>? routineDeploymentEnabled = null,
+        Forge.Configuration.SprintPlanningOptions? planning = null,
+        Func<string, IssueRecord, CancellationToken, Task<bool>>? deliveryEvidenceReconciler = null,
+        Func<string, CancellationToken, Task<Core.Completion.CompletionPolicySnapshot?>>? completionPolicyResolver = null)
     {
+        _routineDeploymentEnabled = routineDeploymentEnabled;
+        _completionPolicyResolver = completionPolicyResolver;
+        _deliveryEvidenceReconciler = deliveryEvidenceReconciler;
+        _initiativeProposals = initiativeProposals;
+        _planning = planning ?? new();
         _projects = projects;
         _events = events;
         _logger = logger;
@@ -78,13 +90,17 @@ public sealed class SprintAssembler
         _followUpTriage = followUpTriage;
         _wakeup = wakeup;
         _eventPublisher = eventPublisher;
-        _failureAgingWindow = failureAgingWindow;
     }
 
+    private readonly Func<string, bool>? _routineDeploymentEnabled;
+    private readonly Func<string, CancellationToken, Task<Core.Completion.CompletionPolicySnapshot?>>? _completionPolicyResolver;
+    private readonly Func<string, IssueRecord, CancellationToken, Task<bool>>? _deliveryEvidenceReconciler;
+    private readonly InitiativeProposalStore? _initiativeProposals;
+    private readonly Forge.Configuration.SprintPlanningOptions _planning;
+    private readonly Dictionary<string, (string Capacities, SprintPlanBuilder Builder)> _planners = new();
     private readonly Core.IFollowUpTriage? _followUpTriage;
     private readonly WakeupSignal? _wakeup;
     private readonly Core.Messaging.IEventPublisher? _eventPublisher;
-    private readonly TimeSpan? _failureAgingWindow;
 
     public TimeSpan Interval => _interval;
 
@@ -231,80 +247,59 @@ public sealed class SprintAssembler
     /// are all terminal, then assemble + activate the next one from
     /// eligible work. Exposed for tests.
     /// </summary>
+    private readonly Dictionary<string, CompletionCoordinator> completionCoordinators = new(StringComparer.Ordinal);
+
     internal async Task TickProjectAsync(
         string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
+        if (!completionCoordinators.TryGetValue(projectId, out var completion))
+            completionCoordinators[projectId] = completion = new CompletionCoordinator((IssueStore)issues, _followUpTriage, _initiativeProposals, _logger, _events,
+                _deliveryEvidenceReconciler is null ? null : (task, token) => _deliveryEvidenceReconciler(projectId, task, token));
+        await RecoverProposalSourcesAsync(projectId, issues, ct);
+        await completion.ReconcileAsync(ct);
         var prevState = await ReadBuildStateAsync(issues, ct);
-        // Aged-failure triage FIRST: a sprint whose last open task is
-        // an ancient Failed would otherwise sit Active forever, and a
-        // backlog held hostage by dead failures starves assembly
-        // silently (operator direction 2026-08-18: "fix this
-        // permanently"). Fresh failures stay untouched — the
-        // no-auto-clear rule is about the operator investigating
-        // RECENT failures; past the aging window the task is
-        // definitionally abandoned. The closure cascades through
-        // CloseTerminalEpicsAsync below (stories/epics auto-close
-        // behind it).
-        await SweepAgedFailuresAsync(projectId, issues, ct);
+        // Failed tasks remain open until an explicit operator action. Age is
+        // diagnostic information, never evidence of completion or abandonment.
         string? completedSprintId = null;
         string? completedSprintName = null;
         var active = await sprints.GetActiveAsync(ct);
         if (active is not null)
         {
-            var (complete, total, terminal) = await CompletionProgressAsync(active, issues, sprints, ct);
+            if (sprints is SprintStore ownedSprints)
+                await ownedSprints.RetireClosedVisibilityMembersAsync(active.Id, ct);
+            var (complete, total, terminal, heldMembers) = await CompletionProgressAsync(active, issues, sprints, ct);
             if (!complete)
             {
-                // Ad-hoc injection (operator rule 2026-07-27): a
-                // groomed ad-hoc task joins the ACTIVE sprint when it
-                // BELONGS there — it is part of the same work (its
-                // followUpOf chain reaches a sprint member) or it
-                // enables/unblocks the ongoing work (a blocks edge to
-                // a member, or an operator P1/blocker flag). Unrelated
-                // groomed ad-hoc work gets its own solo sprint at
-                // assembly instead.
-                await InjectAdHocAsync(active, projectId, issues, sprints, ct);
+                // Finish the current objective. Only groomed ad-hoc work with
+                // an actual blocks edge into this sprint may join automatically;
+                // urgency and requeue metadata do not interrupt the sprint.
+                await InjectPrerequisitesAsync(active, projectId, issues, sprints, specs, ct);
                 await WriteBuildStateAsync(issues, new SprintBuildState(
                     Phase: "running",
-                    Reason: $"Sprint '{active.Name}' in progress — {terminal}/{total} tasks terminal",
+                    Reason: heldMembers.Count == 0
+                        ? $"Sprint '{active.Name}' in progress - {terminal}/{total} tasks terminal"
+                        : $"Sprint '{active.Name}' held by Failed/Blocked work - investigate, requeue or explicitly close the affected tasks; age does not resolve failures",
                     UpdatedAt: DateTime.UtcNow,
                     CompletedSprintId: null, CompletedSprintName: null,
                     PendingGroom: Array.Empty<PendingGroomItem>(),
                     EligibleGroups: Array.Empty<EligibleGroupItem>(),
                     ActiveSprintId: active.Id, ActiveSprintName: active.Name,
-                    ActiveTotal: total, ActiveTerminal: terminal), ct);
+                    ActiveTotal: total, ActiveTerminal: terminal, HeldWork: heldMembers), ct);
                 return;
             }
-            await sprints.UpdateAsync(active.Id,
-                new Dictionary<string, object?> { ["status"] = nameof(SprintStatus.Completed) }, ct);
-            _logger.LogInformation("Sprint {SprintId} ({Name}) completed — all member tasks terminal (project={Project})",
-                active.Id, active.Name, projectId);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintCompleted,
-                null, $"Sprint '{active.Name}' completed"));
+            var existingReceipt = await new Core.Completion.SprintCompletionStore((IssueStore)issues).GetAsync("completion-" + active.Id, ct);
+            var policy = existingReceipt?.CompletionPolicy ?? await new Core.Completion.SprintCompletionStore((IssueStore)issues).ReadSprintPolicyAsync(active.Id, ct);
+            var receipt = existingReceipt ?? await completion.CompleteAsync(active, sprints, ct, _routineDeploymentEnabled?.Invoke(projectId) ?? false, policy);
             completedSprintId = active.Id;
             completedSprintName = active.Name;
-
-            // Materialize tracked follow-ups (operator model
-            // 2026-07-31): drafts filed DURING the sprint become real
-            // work only now — the work they reference is merged and
-            // canonical. The batch triage (when wired) merges dupes,
-            // groups epics, and discards junk first; invalid or
-            // unavailable triage falls back to 1:1. Either way the
-            // results go through grooming before the next sprint
-            // assembles (the gate below).
-            var draftStore = new Core.FollowUpDraftStore((Core.IssueStore)issues);
-            var unconsumed = await draftStore.ListUnconsumedAsync(ct);
-            var materialized = await MaterializeFollowUpsAsync(projectId, issues, specs, draftStore, unconsumed, ct);
-            if (materialized > 0)
+            if (existingReceipt is null)
             {
-                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintMaterialized,
-                    null, $"{materialized} work item(s) materialized from '{active.Name}' follow-ups",
-                    new Dictionary<string, object?>
-                    {
-                        ["projectId"] = projectId,
-                        ["created"] = materialized,
-                        ["drafts"] = unconsumed.Count,
-                    }));
+                _logger.LogInformation("Sprint {SprintId} work terminal; outcome={Outcome}, durable bookkeeping pending", active.Id, receipt.EngineeringOutcome);
+                _events.Publish(new DashboardEvent(DateTime.UtcNow, receipt.EngineeringOutcome == Core.Completion.EngineeringOutcome.Satisfied || receipt.CompletionPolicy is null
+                    ? DashboardEventKind.SprintCompleted : DashboardEventKind.SprintDeliveryPending,
+                    null, $"Sprint '{active.Name}' work terminal; outcome: {receipt.EngineeringOutcome}"));
             }
+            await completion.ReconcileAsync(ct);
         }
 
         // Epic lifecycle: close epics whose entire tree is terminal
@@ -328,16 +323,30 @@ public sealed class SprintAssembler
             return;
         }
 
-        // Follow-up grooming gate (operator model 2026-07-31): the
-        // next sprint does NOT start until the materialized
-        // follow-ups are resolved (groomed or closed by the ad-hoc
-        // groomer pass).
+        var blockers = await new Core.Completion.SprintCompletionStore((IssueStore)issues).ListPlanningBlockersAsync(limit: 1, ct: ct);
+        if (blockers.Count > 0)
+        {
+            var blocker = blockers[0];
+            var delivery = blocker.CompletionPolicy?.EnvironmentName is { } target
+                ? $"await verified deployment to {target}"
+                : "await qualified deployment or the remaining recorded acceptance evidence";
+            var reason = blocker.BookkeepingState != "Completed"
+                ? $"Sprint {blocker.SprintId} follow-up bookkeeping is unfinished; review triage status before starting another sprint"
+                : $"Sprint {blocker.SprintId} requires delivery evidence ({blocker.EngineeringOutcome}): {blocker.DeliveryNote ?? delivery}";
+            await WriteBuildStateAsync(issues, EmptyState("awaiting-completion", reason, blocker.SprintId, completedSprintName), ct);
+            return;
+        }
+
+        var assembled = await AssembleNextAsync(projectId, issues, sprints, specs, ct);
+
+        // Follow-up grooming is visible when no coherent candidate can start: the
+        // unrelated ungroomed follow-ups do not hold ready coherent work.
         var pendingFollowUpRows = (await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct))
             .Where(i => i.GetMetadata("followUpOf") is not null
                 && !string.Equals(i.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase))
             .OrderBy(i => i.CreatedAt)
             .ToList();
-        if (pendingFollowUpRows.Count > 0)
+        if (assembled is null && pendingFollowUpRows.Count > 0)
         {
             var reason = $"Sprint assembly waiting: {pendingFollowUpRows.Count} materialized follow-ups awaiting grooming";
             _logger.LogInformation("{Reason} (project={Project})", reason, projectId);
@@ -370,7 +379,6 @@ public sealed class SprintAssembler
             return;
         }
 
-        var assembled = await AssembleNextAsync(projectId, issues, sprints, specs, ct);
         if (assembled is not null)
         {
             await WriteBuildStateAsync(issues, new SprintBuildState(
@@ -390,7 +398,7 @@ public sealed class SprintAssembler
             // held open by Failed tasks — the operator sees a completed
             // sprint + a busy board and concludes the pipeline died.
             // Name the blockage: how many groups are held, by how many
-            // failures, and when the aging sweep clears them.
+            // failures, and the operator action needed to resolve them.
             var held = await SummarizeHeldWorkAsync(issues, ct);
             if (held.FailedTasks == 0)
             {
@@ -400,12 +408,9 @@ public sealed class SprintAssembler
             }
             else
             {
-                var windowNote = _failureAgingWindow is { } w
-                    ? $"failures auto-close after {w.TotalDays:0} days without operator action"
-                    : "failure aging is disabled — requeue or close Failed tasks to unblock";
                 var reason =
                     $"No eligible work — {held.HeldGroups} group(s) held by {held.FailedTasks} Failed task(s); " +
-                    windowNote;
+                    "investigate, requeue or explicitly close Failed tasks to unblock; age does not resolve failures";
                 if (prevState?.Phase != "starved"
                     || !(prevState.HeldWork ?? Array.Empty<HeldWorkItem>()).Select(h => h.Id).SequenceEqual(held.Items.Select(h => h.Id)))
                 {
@@ -430,44 +435,6 @@ public sealed class SprintAssembler
                     HeldWork: held.Items), ct);
             }
         }
-    }
-
-    /// <summary>
-    /// Close Failed tasks older than the aging window (operator
-    /// direction 2026-08-18): a failure nobody requeued or closed
-    /// within the window is abandoned work, and leaving it Failed
-    /// holds its story/epic (and sprint assembly) hostage forever —
-    /// observed live 2026-08-17/18: porthorizon sat idle 24h+ on 20
-    /// Failed tasks aged 8-17 days while the board read as "busy
-    /// backlog". Fresh failures are NEVER touched (the no-auto-clear
-    /// rule protects the operator's active investigation). Returns the
-    /// number swept.
-    /// </summary>
-    private async Task<int> SweepAgedFailuresAsync(string projectId, IIssueStore issues, CancellationToken ct)
-    {
-        if (_failureAgingWindow is not { } window) return 0;
-        var cutoff = DateTime.UtcNow - window;
-        var failed = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Failed }, ct);
-        var aged = failed.Where(i => i.UpdatedAt <= cutoff).OrderBy(i => i.UpdatedAt).ToList();
-        foreach (var task in aged)
-        {
-            var ageDays = (DateTime.UtcNow - task.UpdatedAt).TotalDays;
-            await issues.TransitionAsync(task.Id, IssueStatus.Closed,
-                $"auto-closed: abandoned failure — Failed {ageDays:0.#} days with no operator action " +
-                $"(aging window {window.TotalDays:0} days). Requeue or re-enqueue to revive the work.", ct: ct);
-            _logger.LogInformation(
-                "Aged failure auto-closed: {Id} (Failed {Age:0.#}d, window {Window:0}d, project={Project})",
-                task.Id, ageDays, window.TotalDays, projectId);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, "sprint.failure.swept",
-                task.Id, $"{task.Id} auto-closed (Failed {ageDays:0.#}d)",
-                new Dictionary<string, object?>
-                {
-                    ["projectId"] = projectId,
-                    ["taskId"] = task.Id,
-                    ["ageDays"] = ageDays,
-                }));
-        }
-        return aged.Count;
     }
 
     /// <summary>Work the operator sees as "backlog" that assembly can
@@ -505,21 +472,25 @@ public sealed class SprintAssembler
     /// floor in 2026-08-11 because Failed was counted as terminal
     /// — Failed must stay open and keep the sprint active.
     /// </summary>
-    private static async Task<(bool Complete, int Total, int Terminal)> CompletionProgressAsync(
+    private static async Task<(bool Complete, int Total, int Terminal, IReadOnlyList<HeldWorkItem> Held)> CompletionProgressAsync(
         SprintRecord sprint, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
     {
         var memberIds = await sprints.GetIssueIdsAsync(sprint.Id, ct);
         var total = 0;
         var terminal = 0;
+        var held = new List<HeldWorkItem>();
         foreach (var id in memberIds)
         {
             var issue = await issues.GetAsync(id, ct);
-            if (issue is null || AgentTaskTypes.IsContainer(issue.Type)
+            if (issue is null) throw new InvalidOperationException("Sprint contains a missing member; completion requires investigation.");
+            if (AgentTaskTypes.IsContainer(issue.Type)
                 || issue.Type == AgentTaskTypes.PrWatch)
             {
                 continue;
             }
             total++;
+            if (issue.Status is IssueStatus.Failed or IssueStatus.Blocked && held.Count < 20)
+                held.Add(new HeldWorkItem(issue.Id, issue.Title, (int)(DateTime.UtcNow - issue.UpdatedAt).TotalDays));
             // Failed does NOT count as terminal: the operator must
             // investigate or requeue (rule 2026-07-25; Sprint 5 of
             // talaria dropped a Failed task onto the floor in
@@ -534,7 +505,7 @@ public sealed class SprintAssembler
         // linked) is complete — defensive, so an empty Active doesn't
         // block assembly forever. A sprint with tasks is NOT complete
         // until all of them are Completed/Closed.
-        return (total == 0 || terminal == total, total, terminal);
+        return (total == 0 || terminal == total, total, terminal, held);
     }
 
     /// <summary>
@@ -549,46 +520,13 @@ public sealed class SprintAssembler
     {
         try
         {
-            var eligible = await ListEligibleAsync(issues, sprints, ct);
-            if (eligible.Count == 0) return Array.Empty<EligibleGroupItem>();
-            var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
-            var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal);
-            var order = new List<string>();
-            foreach (var task in eligible)
-            {
-                var key = ResolveThemeKey(task, byId);
-                if (groups.TryGetValue(key, out var list))
-                {
-                    list.Add(task);
-                }
-                else
-                {
-                    groups[key] = new List<IssueRecord> { task };
-                    order.Add(key);
-                }
-            }
-            await DropCrossProjectGroupsAsync(groups, order, projectId, specs, _logger, ct);
-            var items = new List<EligibleGroupItem>();
-            foreach (var key in order)
-            {
-                var members = groups[key];
-                // Ad-hoc assembles one SOLO sprint per task named
-                // after the task — show the task that would go first.
-                // Follow-up themes name after the LEADING MEMBER too
-                // (the chain root is usually merged already — see
-                // DescribeAsync), not the root task's title.
-                var name = key == AdHocGroupName
-                    ? members.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First().Title
-                    : key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-                        ? members.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First().Title
-                        : (await specs.GetAsync(key, ct))?.Title ?? key;
-                items.Add(new EligibleGroupItem(key, name, members.Count,
-                    members.Min(t => t.Priority), members.Min(t => t.CreatedAt)));
-            }
-            return items
-                .OrderBy(g => g.MinPriority)
-                .ThenBy(g => g.CreatedAt)
-                .ToList();
+            if (issues is not IssueStore concrete) return [];
+            var result = await new SprintPlanBuilder(concrete, sprints, specs, projectId, _gates, _planning,
+                _projects.Find(projectId)?.Options.Roles).BuildAsync(ct);
+            if (result.Snapshot is not { Plan: { } plan } snapshot) return [];
+            var tasks = snapshot.Issues.Where(i => snapshot.TaskIds.Contains(i.Id)).ToArray();
+            return [new EligibleGroupItem(plan.Hash, plan.Objective, tasks.Length,
+                tasks.Min(t => t.Priority), tasks.Min(t => t.CreatedAt))];
         }
         catch (Exception ex)
         {
@@ -606,173 +544,68 @@ public sealed class SprintAssembler
     /// triage (or when it returns null): plain 1:1. Returns the
     /// number of work items created.
     /// </summary>
-    private async Task<int> MaterializeFollowUpsAsync(
-        string projectId, IIssueStore issues, ISpecStore specs,
-        Core.FollowUpDraftStore draftStore, IReadOnlyList<Core.FollowUpDraft> unconsumed, CancellationToken ct)
+    private async Task RecoverProposalSourcesAsync(string projectId, IIssueStore issues, CancellationToken ct)
     {
-        if (unconsumed.Count == 0) return 0;
-
-        Core.FollowUpTriageDecision? decision = null;
-        if (_followUpTriage is not null && unconsumed.Count >= 2)
+        if (_initiativeProposals is null) return;
+        var drafts = new FollowUpDraftStore((IssueStore)issues);
+        var pending = await drafts.ListUnconsumedAsync(ct, excludeCompletionClaims: true);
+        var recovered = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var chunk in pending.Select(d => d.Id).Chunk(100))
         {
-            decision = await _followUpTriage.TriageAsync(projectId, unconsumed, ct);
-            if (decision is null)
+            string? cursor = null;
+            while (true)
             {
-                _logger.LogWarning("Sprint materialization: triage unavailable — falling back to 1:1 ({Count} drafts, project={Project})",
-                    unconsumed.Count, projectId);
-            }
-            else
-            {
-                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintTriageCompleted,
-                    null, $"Follow-up triage: {decision.Items.Count} disposition(s) over {unconsumed.Count} draft(s)",
-                    new Dictionary<string, object?>
-                    {
-                        ["projectId"] = projectId,
-                        ["drafts"] = unconsumed.Count,
-                        ["items"] = decision.Items.Count,
-                    }));
-            }
-        }
-
-        var created = 0;
-        var cited = new HashSet<long>();
-        if (decision is not null)
-        {
-            var byId = unconsumed.ToDictionary(d => d.Id);
-            foreach (var item in decision.Items)
-            {
-                var sources = item.SourceDraftIds.Where(byId.ContainsKey).ToList();
-                if (sources.Count == 0)
+                var bindings = await _initiativeProposals.FindBySourceDraftIdsAsync(projectId, chunk, ct, cursor);
+                foreach (var binding in bindings)
                 {
-                    _logger.LogWarning("Sprint materialization: triage item cites unknown drafts [{Ids}] — dropped",
-                        string.Join(",", item.SourceDraftIds));
-                    continue;
+                    if (!recovered.Add(binding.Id)) continue;
+                    using var source = System.Text.Json.JsonDocument.Parse(binding.SourceJson);
+                    var ids = source.RootElement.GetProperty("sourceDraftIds").EnumerateArray().Select(i => i.GetInt64()).ToArray();
+                    await drafts.SetDispositionBatchAsync(ids, "proposal", binding.Id, ct);
                 }
-                cited.UnionWith(sources);
-                switch (item.Action)
-                {
-                    case "create":
-                    case "merge":
-                    {
-                        var src = sources.Select(id => byId[id]).ToList();
-                        var task = await issues.CreateAsync(new NewIssue(
-                            // The draft's task type routes dispatch to
-                            // the right role (schema v36) — a client or
-                            // QA follow-up born type='task' dies at the
-                            // plan-territory gate (live: task-752).
-                            Type: src.Select(d => d.TaskType).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t)) ?? "task",
-                            Title: item.Title ?? src[0].Title,
-                            Description: item.Description
-                                ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}")),
-                            Priority: item.Priority ?? src.Min(d => d.Priority),
-                            Metadata: new Dictionary<string, object>
-                            {
-                                ["source"] = src[0].SourceRole,
-                                ["followUpOf"] = src[0].SourceIssueId,
-                                ["fromDraft"] = string.Join(",", sources),
-                            }), ct);
-                        foreach (var id in sources)
-                        {
-                            await draftStore.SetDispositionAsync(id,
-                                item.Action == "merge" ? "merged" : "materialized", task.Id, ct);
-                        }
-                        created++;
-                        break;
-                    }
-                    case "epic":
-                    {
-                        var src = sources.Select(id => byId[id]).ToList();
-                        var spec = await specs.CreateAsync(new Core.NewSpec(
-                            ProjectId: projectId,
-                            Title: item.Title ?? $"Follow-up theme from {src.Count} findings",
-                            Body: item.Description
-                                ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}"))), ct);
-                        await specs.SetStatusAsync(spec.Id, Core.SpecStatus.Approved, ct);
-                        foreach (var id in sources)
-                        {
-                            await draftStore.SetDispositionAsync(id, "epic", spec.Id, ct);
-                        }
-                        created++;
-                        break;
-                    }
-                    case "discard":
-                    {
-                        foreach (var id in sources)
-                        {
-                            await draftStore.SetDispositionAsync(id, "discarded",
-                                item.Reason ?? "triaged as junk", ct);
-                        }
-                        break;
-                    }
-                }
+                if (bindings.Count < 100) break;
+                cursor = bindings[^1].Id;
             }
         }
-
-        // Fallback + coverage: 1:1 for anything the triage didn't
-        // cite (or all of it when no triage ran).
-        var remaining = unconsumed.Where(d => !cited.Contains(d.Id)).ToList();
-        foreach (var draft in remaining)
-        {
-            var task = await issues.CreateAsync(new NewIssue(
-                Type: string.IsNullOrWhiteSpace(draft.TaskType) ? "task" : draft.TaskType,
-                Title: draft.Title,
-                Description: draft.Description,
-                Priority: draft.Priority,
-                Metadata: new Dictionary<string, object>
-                {
-                    ["source"] = draft.SourceRole,
-                    ["followUpOf"] = draft.SourceIssueId,
-                    ["fromDraft"] = draft.Id.ToString(),
-                }), ct);
-            await draftStore.SetDispositionAsync(draft.Id, "materialized", task.Id, ct);
-            created++;
-        }
-
-        _logger.LogInformation(
-            "Sprint materialization: {Created} work items from {Drafts} drafts (triaged={Triaged}, project={Project})",
-            created, unconsumed.Count, decision is not null, projectId);
-        return created;
     }
 
     /// <summary>
-    /// Inject groomed ad-hoc tasks that BELONG to the active sprint
-    /// (operator rule 2026-07-27). A sprint is a coherent deployable
-    /// unit — ad-hoc work may join it, but only when it is part of
-    /// the same work or it enables/unblocks it. Three triggers,
-    /// all requiring groomed=true:
-    /// <list type="number">
-    /// <item><b>Same work</b>: the task's followUpOf chain reaches a
-    /// member of the active sprint (a follow-up filed from the
-    /// sprint's own work).</item>
-    /// <item><b>Unblocks</b>: a <c>blocks</c> dependency edge has the
-    /// task blocking an active sprint member (the member cannot
-    /// proceed until it lands — e.g. the merge-gate harness fix).</item>
-    /// <item><b>Operator-urgent</b>: priority 1 or metadata
-    /// blocker=true (the operator's explicit inject signal).</item>
-    /// </list>
-    /// Injection never completes, replaces, or reorders the sprint.
+    /// Add technically groomed ad-hoc prerequisites of active sprint members.
+    /// A real blocks edge establishes necessity. Priority, blocker labels,
+    /// requeue metadata, and follow-up provenance alone are not an interruption.
+    /// Ordinary follow-ups retain their later-sprint materialization policy.
     /// </summary>
-    private async Task InjectAdHocAsync(
-        SprintRecord active, string projectId, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
+    private async Task InjectPrerequisitesAsync(
+        SprintRecord active, string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
-        var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
         var memberIds = (await sprints.GetIssueIdsAsync(active.Id, ct)).ToHashSet(StringComparer.Ordinal);
-        var all = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
+        var currentPlan = issues is IssueStore concrete ? await new SprintProposalAuditStore(concrete.Db).GetPlanForSprintAsync(active.Id,ct) : null;
+        if (currentPlan is null) { _logger.LogWarning("Sprint {Sprint}: approved outcome evidence is missing; no automatic amendments",active.Id); return; }
+        var plannedIds = currentPlan.Members.Select(m=>m.TaskId).ToHashSet(StringComparer.Ordinal);
         var blockersOfMembers = await issues.ListBlockersOfAsync(memberIds, ct);
+        var validator = new SprintActivationValidator(issues, sprints, specs, projectId, _gates, _planning, _projects.Find(projectId)?.Options.Roles);
 
-        foreach (var task in pending)
+        foreach (var blockerId in blockersOfMembers.Order(StringComparer.Ordinal).Take(100))
         {
-            if (AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
-            if (task.ParentIssueId is not null) continue;   // spec-chain work flows through assembly
-            if (memberIds.Contains(task.Id)) continue;
-            if (!string.Equals(task.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)) continue;
-
-            var reason = InjectionReason(task, memberIds, all, blockersOfMembers);
-            if (reason is null) continue;
-
-            await sprints.AddIssueAsync(active.Id, task.Id, ct);
+            var task = await issues.GetAsync(blockerId, ct);
+            if (task is null || task.Status != IssueStatus.Pending || AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
+            if (plannedIds.Contains(task.Id)) continue;
+            const string reason = "unblocks ongoing work";
+            try
+            {
+                var snapshot = await validator.ValidateAsync([task.Id], ct, activating: false);
+                await sprints.AddValidatedPrerequisiteAsync(active.Id, snapshot, ct);
+                memberIds.UnionWith(snapshot.TaskIds);
+                plannedIds.UnionWith(snapshot.TaskIds);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.LogInformation(ex, "Sprint {SprintId}: prerequisite {TaskId} changed or is no longer eligible; deferring amendment",
+                    active.Id, task.Id);
+                continue;
+            }
             _logger.LogInformation(
-                "Sprint {SprintId}: injected ad-hoc task {TaskId} ({Title}) — {Reason}",
+                "Sprint {SprintId}: injected prerequisite task {TaskId} ({Title}) — {Reason}",
                 active.Id, task.Id, task.Title, reason);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
                 task.Id, $"Injected into active sprint '{active.Name}' — {reason}"));
@@ -792,39 +625,6 @@ public sealed class SprintAssembler
                 }, ct);
             }
         }
-    }
-
-    private static string? InjectionReason(
-        IssueRecord task,
-        HashSet<string> memberIds,
-        Dictionary<string, IssueRecord> all,
-        HashSet<string> blockersOfMembers)
-    {
-        // Unblocks: a blocks edge has this task blocking a sprint
-        // member — the member cannot proceed until it lands.
-        // (Operator model 2026-07-31: this is the ONLY organic
-        // injection path — followUpOf-chain "same work" injection was
-        // removed; follow-ups now materialize at sprint completion
-        // and join a LATER sprint through grooming.)
-        if (blockersOfMembers.Contains(task.Id))
-        {
-            return "unblocks ongoing work";
-        }
-        // Operator-urgent.
-        if (task.Priority == 1
-            || string.Equals(task.GetMetadata("blocker"), "true", StringComparison.OrdinalIgnoreCase))
-        {
-            return "operator-flagged blocker";
-        }
-        // Operator requeue: an ad-hoc task the operator explicitly
-        // requeued from Failed/Blocked carries operator intent to
-        // run — inject it (otherwise ad-hoc work never assembles and
-        // the sanctioned requeue path would strand it forever).
-        if (task.GetMetadata("requeuedFromFailedAt") is not null)
-        {
-            return "operator requeue";
-        }
-        return null;
     }
 
     /// <summary>
@@ -888,13 +688,11 @@ public sealed class SprintAssembler
     /// <summary>
     /// The assembly candidate pool: Pending, non-container, non-watch,
     /// not already linked to an ACTIVE sprint (never double-stage work
-    /// that's already on a live board), no open blockers (operator
-    /// report 2026-07-31: a task with an OPEN blocker must not
-    /// assemble — without its blocker in the same sprint it sits
-    /// undispatchable forever and the sprint can never complete;
-    /// observed live: task-348 stalled Sprint 15), and either
+    /// that's already on a live board), and either
     /// spec-chained or groomed ad-hoc (no task enters a sprint
-    /// without grooming). Completed-sprint membership is NOT
+    /// without grooming). Prerequisites are validated and included as a
+    /// dependency closure before activation; dispatch readiness is separate.
+    /// Completed-sprint membership is NOT
     /// disqualifying: a sprint only completes when every member is
     /// terminal, so a Pending task whose sole membership is a
     /// Completed sprint is definitionally an operator requeue —
@@ -921,8 +719,6 @@ public sealed class SprintAssembler
                 && !sprinted.Contains(i.Id))
             .ToList();
 
-        var openBlockers = await issues.OpenBlockersAsync(eligible.Select(i => i.Id).ToList(), ct);
-        eligible = eligible.Where(t => !openBlockers.ContainsKey(t.Id)).ToList();
 
         return eligible
             .Where(t => ResolveGroupKey(t, byId) != AdHocGroupName
@@ -933,172 +729,27 @@ public sealed class SprintAssembler
     private async Task<(string Id, string Name, int TaskCount)?> AssembleNextAsync(
         string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
-        var eligible = await ListEligibleAsync(issues, sprints, ct);
-        if (eligible.Count == 0) return null;
-        var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
-
-        // Group by THEME (operator rule 2026-08-08): spec-chained
-        // tasks under their spec, follow-ups under their followUpOf
-        // root (one sprint per theme — never a solo follow-up
-        // sprint), rootless ad-hoc under the singleton ad-hoc key.
-        var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal);
-        var groupOrder = new List<string>();
-        foreach (var task in eligible)
+        if (issues is not IssueStore concrete)
+            throw new InvalidOperationException("Approved outcome planning requires the owning project store.");
+        var roles = _projects.Find(projectId)?.Options.Roles;
+        var capacities = SprintPlanJson.Hash(roles?.OrderBy(p => p.Key));
+        if (!_planners.TryGetValue(projectId, out var cached) || cached.Capacities != capacities)
+            _planners[projectId] = cached = (capacities, new SprintPlanBuilder(concrete, sprints, specs, projectId, _gates, _planning, roles));
+        var result = await cached.Builder.BuildAsync(ct);
+        if (result.Snapshot is not { } snapshot)
         {
-            var groupKey = ResolveThemeKey(task, byId);
-            if (groups.TryGetValue(groupKey, out var list))
-            {
-                list.Add(task);
-            }
-            else
-            {
-                groups[groupKey] = new List<IssueRecord> { task };
-                groupOrder.Add(groupKey);
-            }
+            _logger.LogInformation("Sprint planning deferred: {Reason}", result.Reason);
+            return null;
         }
-
-        // Cross-project guard: a spec group belongs to the project
-        // that OWNS the spec (see DropCrossProjectGroupsAsync).
-        await DropCrossProjectGroupsAsync(groups, groupOrder, projectId, specs, _logger, ct);
-        if (groupOrder.Count == 0) return null;
-
-        // Resolve each group's display name / goal / age for ordering.
-        // Spec groups: name = spec title, goal = parent epic's
-        // description (the epic is the spec's parent_issue_id) or the
-        // spec title. Oldest group wins; ad-hoc sorts last so real
-        // pipeline work always goes first.
-        async Task<(string Name, string Goal, DateTime CreatedAt)> DescribeAsync(string key)
-        {
-            if (key == AdHocGroupName)
-            {
-                return (AdHocGroupName,
-                    "Operator-enqueued work not tied to a spec epic.",
-                    DateTime.MaxValue);
-            }
-            if (key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-                && groups.TryGetValue(key, out var cluster) && cluster.Count > 0)
-            {
-                var rootId = key[FollowUpThemePrefix.Length..];
-                var rootTitle = byId.TryGetValue(rootId, out var rootTask) ? rootTask.Title : rootId;
-                // Name after the LEADING MEMBER, not the root: the
-                // root is usually long-merged (the follow-up chain
-                // outlives it), and a sprint named for a task it does
-                // not contain reads as work happening OUTSIDE the
-                // sprint (operator confusion 2026-08-18: Sprint 130
-                // was named 'Fix stale inline comment near
-                // MarkConsumed' — the completed root task-660 — while
-                // its only member was task-705's docs wording fix).
-                // The root stays in the goal for chain context.
-                var ordered = cluster.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).ToList();
-                var memberTitles = string.Join("; ", ordered.Take(3).Select(t => t.Title));
-                var goal = $"Follow-up work filed from {rootId} ({rootTitle}): {memberTitles}" +
-                    (cluster.Count > 3 ? $" (+{cluster.Count - 3} more)" : "");
-                return (ordered[0].Title, goal, cluster.Min(t => t.CreatedAt));
-            }
-            var spec = await specs.GetAsync(key, ct);
-            var epicDesc = spec?.ParentIssueId is not null
-                && byId.TryGetValue(spec.ParentIssueId, out var epic)
-                && !string.IsNullOrWhiteSpace(epic.Description)
-                    ? epic.Description!
-                    : null;
-            // Fallback chain when the spec read misses (transient
-            // version-bump race): the parent STORY's title is still a
-            // meaningful short goal — a raw spec id never is.
-            var storyTitle = groups.TryGetValue(key, out var members) && members.Count > 0
-                && members[0].ParentIssueId is not null
-                && byId.TryGetValue(members[0].ParentIssueId!, out var story)
-                    ? story.Title
-                    : null;
-            return (spec?.Title ?? storyTitle ?? key,
-                epicDesc ?? $"Complete all groomed tasks for {spec?.Title ?? storyTitle ?? key}.",
-                spec?.CreatedAt ?? DateTime.MaxValue);
-        }
-
-        var described = new Dictionary<string, (string Name, string Goal, DateTime CreatedAt)>();
-        foreach (var key in groupOrder)
-        {
-            described[key] = await DescribeAsync(key);
-        }
-        // Assembly ordering (operator direction 2026-07-31): priority
-        // FIRST (the group's highest-priority member), then oldest.
-        // Ad-hoc work participates in the same ordering — no longer
-        // forced behind spec groups.
-        var chosenKey = groupOrder
-            .OrderBy(k => groups[k].Min(t => t.Priority))
-            .ThenBy(k => described[k].CreatedAt)
-            .First();
-        var chosen = groups[chosenKey];
-        var (name, goal, _) = described[chosenKey];
-
-        // Rootless ad-hoc assembly is ALWAYS a solo sprint (highest
-        // priority first, then oldest) — never a bundle. Follow-up
-        // themes pack up to MaxThemeTasks per sprint (priority, then
-        // oldest); the remainder stays eligible for the next sprint.
-        if (chosenKey == AdHocGroupName)
-        {
-            var single = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First();
-            chosen = new List<IssueRecord> { single };
-            name = single.Title;
-            goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
-                ?? $"Complete {single.Id}: {single.Title}";
-        }
-        else if (chosenKey.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-            && chosen.Count > MaxThemeTasks)
-        {
-            chosen = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt)
-                .Take(MaxThemeTasks).ToList();
-        }
-
+        var plan = snapshot.Plan!;
         var start = DateTime.UtcNow;
-        var sprint = await sprints.CreateAsync(new NewSprint(
-            Name: name,
-            Goal: goal,
-            StartDate: start,
-            EndDate: start.Add(SprintDuration),
-            Status: SprintStatus.Active), ct);
-
-        // Link tasks AND their parent stories (stories power the
-        // Sprints page progress display; they don't gate completion).
-        var toLink = new HashSet<string>(chosen.Select(t => t.Id), StringComparer.Ordinal);
-        foreach (var task in chosen)
-        {
-            if (task.ParentIssueId is not null)
-            {
-                toLink.Add(task.ParentIssueId);
-            }
-        }
-        foreach (var id in toLink)
-        {
-            await sprints.AddIssueAsync(sprint.Id, id, ct);
-        }
-
-        // Re-publish the activation hint AFTER membership links commit:
-        // the store-level CreateAsync(Active) publish races the linking
-        // writes, so a dispatch loop woken by it can see an active
-        // sprint with an empty member list and park with no further
-        // hint coming (observed in the e2e smoke). Hints are cheap and
-        // idempotent — this second one is the reliable kick.
-        if (_eventPublisher is not null)
-        {
-            var activatedAt = DateTimeOffset.UtcNow;
-            await _eventPublisher.PublishAsync(new Core.Messaging.SprintStatusChanged
-            {
-                MessageId = Core.Messaging.SprintStatusChanged.IdFor(projectId, sprint.Id, "Active:linked", activatedAt),
-                ProjectId = projectId,
-                SprintId = sprint.Id,
-                FromStatus = "(new)",
-                ToStatus = "Active",
-                ChangedAt = activatedAt,
-            }, ct);
-        }
-
-        _logger.LogInformation(
-            "Sprint {SprintId} assembled + activated: '{Name}' with {Tasks} task(s) (group={Group})",
-            sprint.Id, name, chosen.Count, chosenKey);
+        var policy = _completionPolicyResolver is null ? null : await _completionPolicyResolver(projectId, ct);
+        var sprint = await sprints.CreateWithIssuesAsync(new NewSprint(plan.Objective, plan.Objective,
+            start, start.Add(SprintDuration), CompletionPolicy: policy), snapshot, ct);
         _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintStarted,
-            null, $"Sprint '{name}' started with {chosen.Count} task(s)",
-            new Dictionary<string, object?> { ["sprintId"] = sprint.Id, ["taskCount"] = chosen.Count }));
-        return (sprint.Id, name, chosen.Count);
+            null, $"Sprint '{plan.Objective}' started with {snapshot.TaskIds.Count} task(s)",
+            new Dictionary<string, object?> { ["sprintId"] = sprint.Id, ["taskCount"] = snapshot.TaskIds.Count }));
+        return (sprint.Id, plan.Objective, snapshot.TaskIds.Count);
     }
 
     /// <summary>
@@ -1189,6 +840,15 @@ public sealed class SprintAssembler
         {
             if (key == AdHocGroupName || key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)) continue;
             var groupSpec = await specs.GetAsync(key, ct);
+            if (groupSpec is null || groupSpec.Status != SpecStatus.Groomed)
+            {
+                logger.LogInformation("SprintAssembler: spec {SpecId} is not groomed; withholding {Count} task(s)",
+                    key, groups[key].Count);
+                groups.Remove(key);
+                groupOrder.Remove(key);
+                dropped++;
+                continue;
+            }
             if (groupSpec is not null
                 && !string.Equals(groupSpec.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
             {

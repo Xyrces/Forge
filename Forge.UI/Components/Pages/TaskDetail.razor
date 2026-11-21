@@ -1,341 +1,410 @@
+@using Forge.Dashboard.Services
+@using Forge.Dashboard.Features.Tasks
 @page "/tasks/{TaskId}"
+@implements IDisposable
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject HttpClient Http
+@inject PersistentComponentState PersistentState
 @inject NavigationManager Nav
 @using System.Net.Http.Json
 @using System.Text.Json
 
-<PageTitle>Task @TaskId</PageTitle>
-<div class="page">
-    <div class="page-header">
-        <h1>
-            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/sprints"))">← Sprints</button>
-            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/backlog"))">Backlog</button>
-            @(Prop(_task, "title") ?? TaskId)
-        </h1>
+<PageTitle>@(Prop(_task, "title") ?? "Task")</PageTitle>
+<div class="page task-detail">
+    <nav class="task-breadcrumb" aria-label="Breadcrumb"><a href="@SprintLink">Sprints</a><span>/</span><a href="@($"/tasks{ProjectQuery(EffectiveProject)}")">Tasks</a></nav>
+    <div class="page-header page-header--wrapping">
+        <h1>@(Prop(_task, "title") ?? TaskId)</h1>
         <div class="page-header__actions">
-            <a class="btn" href="/flow?issue=@TaskId">View in flow</a>
-            @if (Prop(_task, "status") is "Failed" or "Blocked" or "InProgress")
-            {
-                <button class="btn" disabled="@_resetting" @onclick="ResetStrikesAsync"
-                        title="Clear all strike counters (rework, review, no-progress, auto-resume), refresh the stale window, and requeue if Failed/Blocked">
-                    @(_resetting ? "Resetting…" : "Clear strikes & requeue")
-                </button>
-            }
-            @if (Prop(_task, "status") is not ("Completed" or "Closed") && Prop(_task, "status") is not null)
-            {
-                <button class="btn" disabled="@_closing" @onclick="@(() => _closeOpen = !_closeOpen)"
-                        title="Retire this task outright — work already on main via another task, superseded, won't-fix. Optionally closes the linked PR unmerged.">
-                    Close task…
-                </button>
-            }
-            <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
+            @if (Meta("prNumber") is { } pr && PrUrl(pr) is { } url)
+            { <a class="btn" href="@url" target="_blank" rel="noopener">Open PR #@pr ↗</a> }
+            <button class="btn" @onclick="LoadAsync">Refresh</button>
         </div>
     </div>
-
-    @if (_closeOpen)
-    {
-        <div class="card" style="margin-bottom:14px">
-            <div class="page-subtitle" style="margin-bottom:8px">Close task as obsolete / won't-fix</div>
-            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
-                <input class="mono" style="flex:1; min-width:280px; background:var(--surface-1); border:1px solid var(--outline); color:var(--on-surface); padding:6px 8px; border-radius:var(--radius-md)"
-                       placeholder="Reason (audit trail) — e.g. obsolete: task-351's 1939d2e on main already carries the fix"
-                       @bind="_closeReason" />
-                <label style="display:flex; gap:6px; align-items:center">
-                    <input type="checkbox" @bind="_closePr" />
-                    <span class="meta-text">also close linked PR unmerged</span>
-                </label>
-                <button class="btn btn--primary" disabled="@(_closing || string.IsNullOrWhiteSpace(_closeReason))" @onclick="CloseTaskAsync">
-                    @(_closing ? "Closing…" : "Confirm close")
-                </button>
-                <button class="btn" @onclick="@(() => _closeOpen = false)">Cancel</button>
-            </div>
-            @if (_closeResult is not null)
-            {
-                <div class="meta-text" style="margin-top:8px">@_closeResult</div>
-            }
-        </div>
-    }
-
-    @if (_error is not null)
-    {
-        <div class="banner banner--error"><span>@_error</span></div>
-    }
-    @if (_task is null && _error is null)
-    {
-        <div class="page-subtitle">Loading…</div>
-    }
+    @if (_error is not null) { <div class="banner banner--error" role="alert">Couldn’t refresh task: @_error. The previous view may be out of date.</div> }
+    @if (_retryError is not null) { <div class="banner banner--error" role="alert">@_retryError</div> }
+    @if (_task is null) { <p>Loading task…</p> }
     else
     {
-        <div class="card" style="margin-bottom:14px">
-            <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
-                <span class="pill pill--@StatusCss">@Prop(_task, "status")</span>
-                @if (_state is not null)
-                {
-                    <span class="pill pill--primary">@_state.State@(_state.Substate is not null ? $" · {_state.Substate}" : "")</span>
-                    <span class="meta-text">waiting on: @_state.WaitingOn</span>
-                    @if (_state.Strikes > 0)
-                    {
-                        <span class="pill pill--blocked">@_state.Strikes/@_state.MaxStrikes strikes</span>
-                    }
-                }
-                @if (Meta("reviewStartedAt") is not null)
-                {
-                    <span class="pill pill--info">reviewing…</span>
-                }
-                else if (IsReviewPending)
-                {
-                    <span class="pill pill--info">review pending</span>
-                }
-                <span class="mono">@Prop(_task, "type")</span>
-                <span class="mono">@TaskId</span>
-                <span class="mono">priority @Prop(_task, "priority")</span>
-                @if (Prop(_task, "assignee") is { } assignee)
-                {
-                    <span class="mono">@assignee</span>
-                }
-                @if (Prop(_task, "dispatchCheckpoint") is { } cp)
-                {
-                    <span class="mono">checkpoint: @cp</span>
-                }
-                @if (Prop(_task, "parentIssueId") is { } parent)
-                {
-                    <a href="/tasks/@parent" class="mono">parent: @parent</a>
-                }
-            </div>
+        <div class="task-outcome"><strong>@Situation("label")</strong><span>@Situation("text")</span>
+            @if (Situation("nextActor") is { Length: > 0 } actor) { <span>Next: @actor</span> }
         </div>
-
-        <div class="card" style="margin-bottom:14px">
-            <h2>Links & state</h2>
-            <table class="data-grid">
-                <tbody>
-                    @if (Meta("prNumber") is { } pr && PrUrl(pr) is { } url)
-                    {
-                        <tr><td>Pull request</td><td><a href="@url" target="_blank" rel="noopener">PR #@pr</a></td></tr>
-                    }
-                    @if (Meta("branch") is { } branch)
-                    {
-                        <tr><td>Branch</td><td class="mono">@branch</td></tr>
-                    }
-                    @if (Meta("worktreePath") is { } wt)
-                    {
-                        <tr><td>Worktree</td><td class="mono">@wt</td></tr>
-                    }
-                    @if (Meta("reworkAttempts") is { } attempts)
-                    {
-                        <tr><td>Rework</td><td><span class="pill pill--blocked">R@(attempts)</span> @(Meta("reworkReason") ?? "")</td></tr>
-                    }
-                    @if (Meta("reworkContext") is { } reworkCtx)
-                    {
-                        <tr><td>Rework context</td><td><pre class="mono" style="white-space:pre-wrap; max-height:160px; overflow:auto">@reworkCtx</pre></td></tr>
-                    }
-                    @if (Meta("reviewVerdict") is not null || Meta("reviewSha") is not null)
-                    {
-                        var reviewVerdict = Meta("reviewVerdict");
-                        <tr>
-                            <td>Review</td>
-                            <td>
-                                @if (reviewVerdict is not null)
-                                {
-                                    <span class="pill pill--@(reviewVerdict == "Approve" ? "success" : reviewVerdict == "RequestChanges" ? "blocked" : "warn")">
-                                        @(reviewVerdict == "Approve" ? "approved" : reviewVerdict == "RequestChanges" ? "changes requested" : reviewVerdict.ToLowerInvariant())
-                                    </span>
-                                }
-                                else
-                                {
-                                    <span class="pill">pending</span>
-                                }
-                                @if (Meta("reviewRound") is { } reviewRound)
-                                {
-                                    <span class="pill pill--blocked">R@(reviewRound)</span>
-                                }
-                                @if (Meta("reviewSha") is { } reviewSha)
-                                {
-                                    <span class="mono meta-text">@("@")@reviewSha.Substring(0, Math.Min(7, reviewSha.Length))</span>
-                                }
-                            </td>
-                        </tr>
-                    }
-                    @if (Meta("reviewNotes") is { Length: > 0 } reviewNotes)
-                    {
-                        <tr><td>Review notes</td><td><pre class="mono" style="white-space:pre-wrap; max-height:160px; overflow:auto">@reviewNotes</pre></td></tr>
-                    }
-                    @if (PlanGate is { } pg)
-                    {
-                        <tr>
-                            <td>Plan gate</td>
-                            <td>
-                                @if (pg.Approved)
-                                {
-                                    <span class="pill pill--success">approved</span>
-                                }
-                                else if (pg.Failed)
-                                {
-                                    <span class="pill pill--blocked">rejected</span>
-                                }
-                                else
-                                {
-                                    <span class="pill">pending</span>
-                                }
-                                @if (pg.FastPath) { <span class="pill">fast-path</span> }
-                                <span class="meta-text"> @pg.Revisions revision(s)</span>
-                            </td>
-                        </tr>
-                        @foreach (var v in pg.Verdicts)
-                        {
-                            <tr>
-                                <td class="meta-text">gate: @v.Gate</td>
-                                <td><span class="pill pill--@(v.Outcome == "Approve" ? "success" : "blocked")">@v.Outcome</span> <span class="meta-text">@v.Feedback</span></td>
-                            </tr>
-                        }
-                        @if (!string.IsNullOrWhiteSpace(pg.Plan))
-                        {
-                            <tr><td>Plan</td><td><pre class="mono" style="white-space:pre-wrap; max-height:220px; overflow:auto">@pg.Plan</pre></td></tr>
-                        }
-                    }
-                    @if (Meta("qaVerdict") is { Length: > 0 } qaVerdict)
-                    {
-                        <tr>
-                            <td>QA stage</td>
-                            <td>
-                                <span class="pill pill--@(qaVerdict == "pass" ? "success" : qaVerdict == "fail" ? "error" : "warn")">@qaVerdict</span>
-                                @if (Meta("qaRound") is { Length: > 0 } qaRound)
-                                {
-                                    <span class="meta-text"> round @qaRound</span>
-                                }
-                                @if (Meta("qaSha") is { Length: > 0 } qaSha)
-                                {
-                                    <span class="meta-text"> at @(qaSha[..Math.Min(7, qaSha.Length)])</span>
-                                }
-                            </td>
-                        </tr>
-                        @if (Meta("qaNotes") is { Length: > 0 } qaNotes)
-                        {
-                            <tr><td class="meta-text">qa notes</td><td><pre class="mono" style="white-space:pre-wrap; max-height:160px; overflow:auto">@qaNotes</pre></td></tr>
-                        }
-                    }
-                    @if (Meta("triageAction") is { Length: > 0 } triageAction)
-                    {
-                        <tr>
-                            <td>Triage</td>
-                            <td>
-                                <span class="pill pill--@TriageTone(triageAction)">@triageAction</span>
-                                @if (Meta("triageActionAt") is { Length: > 0 } at)
-                                {
-                                    <span class="meta-text"> @at</span>
-                                }
-                            </td>
-                        </tr>
-                        @if (Meta("triageNote") is { Length: > 0 } triageNote)
-                        {
-                            <tr><td class="meta-text">triage note</td><td><pre class="mono" style="white-space:pre-wrap; max-height:160px; overflow:auto">@triageNote</pre></td></tr>
-                        }
-                    }
-                    @if (_sprint is not null)
-                    {
-                        <tr>
-                            <td>Sprint</td>
-                            <td>
-                                <a href="/sprints">@Prop(_sprint, "name")</a>
-                                <span class="pill pill--@Prop(_sprint, "status")?.ToLowerInvariant()">@Prop(_sprint, "status")</span>
-                            </td>
-                        </tr>
-                    }
-                    <tr><td>Created</td><td class="mono">@FmtDate(Prop(_task, "createdAt"))</td></tr>
-                    <tr><td>Updated</td><td class="mono">@FmtDate(Prop(_task, "updatedAt"))</td></tr>
-                    @if (Prop(_task, "closedAt") is { } closed)
-                    {
-                        <tr><td>Closed</td><td class="mono">@FmtDate(closed)</td></tr>
-                    }
-                </tbody>
-            </table>
-        </div>
-
-        @if (Prop(_task, "description") is { Length: > 0 } desc)
+        <TaskHumanReview Required="@HumanReviewRequired" Status="@Prop(_task, "status")" Nominee="@NominatedHuman"
+                         Summary="@Situation("humanReviewSummary")" SyncPending="@(Meta("humanReviewSyncPending")?.Equals("true", StringComparison.OrdinalIgnoreCase) == true)" Class="banner banner--info" />
+        @if (!IsTerminal && Meta("reviewGateError") is { Length: > 0 } gateError) { <p class="banner banner--error" role="alert"><strong>Review gate unavailable.</strong> @gateError</p> }
+        @if (!IsTerminal && Meta("reviewIntegrationError") is { Length: > 0 } publicationError && (Meta("reviewBudgetDeniedHead") is not { Length: > 0 } budgetHead || budgetHead != Meta("reviewSha")))
         {
-            <div class="card" style="margin-bottom:14px">
-                <h2>Description</h2>
-                <pre class="mono" style="white-space:pre-wrap; max-height:240px; overflow:auto">@desc</pre>
-            </div>
+            <p class="banner banner--error" role="alert"><strong>Review publication needs attention.</strong> @publicationError</p>
         }
-
-        <div class="card" style="margin-bottom:14px">
-            <h2>Agent runs (@_runs.Count)</h2>
-            @if (_runs.Count == 0)
+        <div class="task-controls">
+            @foreach (var section in new[] { "Overview", "Review", "Plan & checks", "History & runs" })
+            { <button class="btn @(_section == section ? "btn--primary" : "")" aria-pressed="@(_section == section)" @onclick="() => SelectSectionAsync(section)">@section</button> }
+            @if (CanActOnLoadedTask && Prop(_task, "status") is not ("Completed" or "Closed"))
             {
-                <p class="hint">No agent runs recorded for this task yet.</p>
-            }
-            else
-            {
-                <table class="data-grid">
-                    <thead>
-                        <tr><th>Status</th><th>Started</th><th>Duration</th><th>Progress</th><th>Error</th></tr>
-                    </thead>
-                    <tbody>
-                        @foreach (var r in _runs)
-                        {
-                            <tr>
-                                <td>
-                                    <span class="pill role-@r.Role.ToLowerInvariant()">@r.Role</span>
-                                    <a href="@($"/runs/{r.Id}{ProjectQuery(r.ProjectId)}")">
-                                        <span class="pill @(r.Status == "succeeded" ? "pill--completed" : r.Status == "running" ? "pill--inprogress" : "pill--failed")">@r.Status</span>
-                                    </a>
-                                    @if (r.ResumedSession == true)
-                                    {
-                                        <span class="pill pill--info">resumed</span>
-                                    }
-                                </td>
-                                <td class="mono">@r.StartedAt.ToString("MM-dd HH:mm:ss")</td>
-                                <td class="mono">@(r.DurationMs is null ? "…" : $"{TimeSpan.FromMilliseconds(r.DurationMs.Value).TotalSeconds:F0}s")</td>
-                                <td class="mono">@(r.Phase is { Length: > 0 } p ? p + " · " : "")@(r.MessageCount ?? 0) msgs · @(r.ToolCallCount ?? 0) tools</td>
-                                <td class="mono" style="font-size:11px; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="@r.Error">@(r.Error ?? "")</td>
-                            </tr>
-                        }
-                    </tbody>
-                </table>
+                <details class="task-actions"><summary>Task actions</summary>
+                    <button class="btn" disabled="@(_holdSaving || !_holdLoaded)" @onclick="ToggleHumanReviewAsync">@(_explicitHumanHold ? "Release task review hold" : NominatedHuman is null ? "Require human review for this task" : $"Require review by @{NominatedHuman} for this task")</button>
+                    @if (_humanPolicy is "Human" or "Both") { <p class="meta-text">Project policy requires human review. Releasing a task hold does not waive that policy.</p> }
+                    @if (Prop(_task, "status") is "Failed" or "Blocked") { <button class="btn" disabled="@_resetting" @onclick="RetryAsync">@(Meta("blockedKind") == "review-integration" ? "Retry review" : "Retry work")</button> }
+                    <button class="btn" @onclick="() => _closeOpen = !_closeOpen">Close task…</button>
+                </details>
             }
         </div>
-
-        <div class="card">
-            <h2>Timeline (@_events.Count events)</h2>
-            @if (_events.Count == 0)
+        @if (_holdError is not null) { <p class="banner banner--error" role="alert">@_holdError</p> }
+        @if (_closeOpen && CanActOnLoadedTask)
+        {
+            <section class="card"><h2>Close task</h2><label>Reason<input class="task-reason" @bind="_closeReason" /></label><label><input type="checkbox" @bind="_closePr" /> Also close the linked PR unmerged</label>
+                <button class="btn" disabled="@(_closing || string.IsNullOrWhiteSpace(_closeReason))" @onclick="CloseTaskAsync">Confirm close</button><button class="btn" @onclick="() => _closeOpen = false">Cancel</button><p role="status">@_closeResult</p>
+            </section>
+        }
+        @if (_section == "Overview")
+        {
+            <div class="task-detail-grid">
+                <section class="card"><TaskDeliverySummary Data="@_delivery" Description="@Prop(_task, "description")"
+                    Repository="@_repoUrl" SprintUrl="@(_sprint is null ? null : SprintLink)" />
+                    @if (Meta("lastError") is { Length: > 0 } error) { <details><summary>Earlier interruption</summary><RecordedMarkdown Text="@error" /></details> }
+                </section>
+                <aside class="card"><h2>Task context</h2><dl class="task-facts"><dt>Role</dt><dd>@WorkPresentation.Role(Prop(_task, "type"))</dd>
+                    @if (_sprint is not null) { <dt>Sprint</dt><dd><a href="@SprintLink">@Prop(_sprint, "name")</a><p class="meta-text">Deployment and browser acceptance are recorded with the sprint.</p></dd> }
+                    <dt>Updated</dt><dd>@FmtDate(Prop(_task, "updatedAt"))</dd>
+                    @if (Prop(_task, "parentIssueId") is { } parent) { <dt>Parent</dt><dd><a href="@($"/tasks/{Uri.EscapeDataString(parent)}{ProjectQuery(EffectiveProject)}")">Open parent work</a></dd> }
+                </dl><details><summary>Technical identifiers</summary><dl class="task-facts"><dt>Task</dt><dd><code>@TaskId</code></dd><dt>Branch</dt><dd><code>@Meta("branch")</code></dd><dt>Workspace</dt><dd><code>@Meta("worktreePath")</code></dd><dt>State</dt><dd>@(_state?.State ?? Meta("state") ?? Prop(_task, "status"))</dd><dt>Recovery counter</dt><dd>@(_state?.Strikes.ToString() ?? "Open History & runs to load")</dd></dl></details></aside>
+            </div>
+            @if (CanActOnLoadedTask && Prop(_task, "status") == "Pending" && !string.IsNullOrWhiteSpace(EffectiveProject))
+            { <TaskRegroom @key="RecoveryTarget" TaskId="@TaskId" ProjectId="@(EffectiveProject!)" Requested="RegroomRequestedAsync" /> }
+            @if (_regroomNotice is not null && _regroomNoticeTarget == RecoveryTarget) { <p role="status">@_regroomNotice</p> }
+        }
+        else if (_section == "Review")
+        {
+            @if (IsTerminal && Meta("reviewGateError") is { Length: > 0 } earlierGateError)
             {
-                <p class="hint">No events recorded for this task yet.</p>
+                <details><summary>Earlier review gate error</summary><p>@earlierGateError</p></details>
             }
-            <table class="data-grid">
-                <thead>
-                    <tr><th>When</th><th>Kind</th><th>Detail</th></tr>
-                </thead>
-                <tbody>
+            @if (IsTerminal && Meta("reviewIntegrationError") is { Length: > 0 } earlierPublicationError)
+            {
+                <details><summary>Earlier review publication error</summary><p>@earlierPublicationError</p></details>
+            }
+            @if (_legacyLoading) { <p role="status">Loading original review sources…</p> }
+            @if (_legacyError is not null) { <p class="banner banner--warn">@_legacyError <button class="btn" @onclick="LoadLegacyReviewsAsync">Retry source history</button></p> }
+            @if (_nativeReviews.Count > 0)
+            {
+                <section class="card"><h2>GitHub reviews and inline discussions</h2><p class="meta-text">Recorded decisions, not a new merge decision. Eligibility and outstanding objections are checked separately before merge. Later approval does not prove each earlier discussion was resolved.</p>
+                @foreach (var native in _nativeReviews)
+                {
+                    <article class="task-finding"><h3>@NativeDecisionLabel(native.Verdict) · @native.Reviewer</h3>
+                        <p class="meta-text">@native.Role · @FmtDate(native.SubmittedAt) · GitHub-reported revision <RevisionLink Sha="@native.HeadSha" Repository="@_repoUrl" />@if (!IsTerminal) { <text>@(native.HeadSha is not null && native.HeadSha == Meta("branchSha") ? " · Current recorded revision" : " · Earlier or unconfirmed revision")</text> }</p>
+                        <RecordedMarkdown Text="@ReviewProse.Format(native.Summary, native.Role == "Forge reviewer App")" />
+                        @foreach (var comment in native.Comments)
+                        {
+                            <details><summary>@comment.Path · @comment.Author@(comment.InReplyToId is null ? " · Inline comment" : " · Discussion reply")</summary>
+                                <RecordedMarkdown Text="@comment.Body" /><p class="meta-text">Original commented revision: <RevisionLink Sha="@comment.OriginalHead" Repository="@_repoUrl" />. The excerpt is GitHub’s recorded diff context; no correction is inferred.</p>
+                                <pre class="task-source" tabindex="0" aria-label="Recorded diff context; scroll horizontally for long lines"><code>@comment.DiffHunk</code></pre>
+                                @if (SafeReviewUrl(comment.Url) is { } commentUrl) { <a href="@commentUrl" target="_blank" rel="noopener">Open exact GitHub discussion ↗</a> }
+                            </details>
+                        }
+                        @if (SafeReviewUrl(native.Url) is { } nativeUrl) { <a href="@nativeUrl" target="_blank" rel="noopener">Original GitHub review ↗</a> }
+                    </article>
+                }
+                </section>
+            }
+            @foreach (var sourceNote in _legacyNotes) { <p class="meta-text">@sourceNote</p> }
+            @if (_legacyReviews.Count > 0)
+            {
+                var review = _legacyReviews[Math.Clamp(_legacyIndex, 0, _legacyReviews.Count - 1)];
+                <section class="card"><label>Review decision <select @bind="_legacyIndex" @bind:after="ResetLegacyCode">@for (var i = 0; i < _legacyReviews.Count; i++) { <option value="@i">Review @_legacyReviews[i].Round · @DecisionLabel(_legacyReviews[i].Verdict)</option> }</select></label>
+                    <div class="task-review-heading"><h2>@DecisionLabel(review.Verdict)</h2><span>Published by @review.Reviewer · @FmtDate(review.SubmittedAt)</span></div>
+                    <p class="meta-text">Historical assessment from a PR comment. Its author is shown above; this was not a formal GitHub review.</p>
+                    <p>Reviewed revision: <RevisionLink Sha="@review.HeadSha" Repository="@_repoUrl" /></p>
+                    <RecordedMarkdown Text="@ReviewProse.Legacy(review.Summary, review.Round, review.Verdict)" />
+                    @foreach (var finding in review.Findings)
+                    {
+                        var excerpt = _laterCode ? finding.LaterCode : finding.ReportedCode;
+                        <article class="task-finding"><h3>@finding.Path · lines @finding.Line–@finding.EndLine</h3><p class="meta-text">@finding.VerificationNote</p>
+                            <div class="task-controls"><button class="btn @(!_laterCode ? "btn--primary" : "")" @onclick="() => _laterCode = false">Reported code</button>
+                                @if (finding.LaterCode is not null) { <button class="btn @(_laterCode ? "btn--primary" : "")" @onclick="() => _laterCode = true">Later reviewed revision</button> }
+                            </div>
+                            @if (excerpt is not null) { <p class="meta-text"><RevisionLink Sha="@excerpt.HeadSha" Repository="@_repoUrl" /> · excerpt lines @excerpt.Line–@excerpt.EndLine</p><pre class="task-source" tabindex="0" aria-label="Verified source excerpt; scroll horizontally for long lines"><code>@CodeLines(excerpt)</code></pre><a href="@excerpt.Url" target="_blank" rel="noopener">Open verified source ↗</a> }
+                            else { <p>Source excerpt unavailable.</p> }
+                        </article>
+                    }
+                    <a href="@review.Url" target="_blank" rel="noopener">Original PR comment ↗</a>
+                </section>
+            }
+            @if (ReviewHistory.Count > 0)
+            {
+                var history = ReviewHistory;
+                var selected = history[Math.Clamp(_reviewIndex, 0, history.Count - 1)];
+                <section class="card"><label>Review decision <select @bind="_reviewIndex">@for (var i = 0; i < history.Count; i++) { <option value="@i">Review @history[i].Round · @DecisionLabel(history[i].Verdict)</option> }</select></label>
+                    <div class="task-review-heading"><h2>@DecisionLabel(selected.Verdict)</h2><span>@(selected.Reviewer ?? "Reviewer not recorded") · @FmtDate(selected.SubmittedAt)</span></div>
+                    <p class="meta-text">Reviewed revision <RevisionLink Sha="@selected.HeadSha" Repository="@_repoUrl" /></p><RecordedMarkdown Text="@ReviewProse.Format(selected.Summary, true)" />
+                    @foreach (var finding in selected.Findings ?? [])
+                    {
+                        <article class="task-finding"><h3>@finding.Path · line @finding.Line</h3><RecordedMarkdown Text="@finding.Body" />
+                            @if (FindingUrl(selected.HeadSha, finding.Path, finding.Line, finding.Side) is { } location) { <a href="@location" target="_blank" rel="noopener">Open code at reviewed revision ↗</a> }
+                            else { <p class="meta-text">Use the original review to inspect this diff location.</p> }
+                        </article>
+                    }
+                    @if (SafeReviewUrl(selected.Url) is { } reviewUrl) { <a href="@reviewUrl" target="_blank" rel="noopener">Original GitHub review ↗</a> }
+                    <p class="meta-text">Decisions apply to the recorded revision. A later approval does not establish the resolution of each earlier finding.</p>
+                </section>
+            }
+            else if (_legacyReviews.Count == 0 && _nativeReviews.Count == 0)
+            {
+            <section class="card"><div class="task-review-heading"><h2>@ReviewLabel</h2><span class="meta-text">Forge reviewer · @(Meta("reviewRound") is { } round ? $"Review {round}" : "Review number not recorded")</span></div>
+                <dl class="task-facts"><dt>Revision</dt><dd><RevisionLink Sha="@Meta("reviewSha")" Repository="@_repoUrl" /></dd><dt>Source</dt><dd>Forge’s recorded verdict. See the PR for formal GitHub decisions and inline discussions.</dd></dl>
+                @if (!IsTerminal && Meta("reviewSha") is { } reviewed && Meta("branchSha") is { } head && reviewed != head) { <p class="banner banner--warn">This decision applies to an earlier revision. The current revision needs its own review.</p> }
+                @if (Meta("reviewNotes") is { Length: > 0 } notes) { <RecordedMarkdown Text="@ReviewProse.Format(notes, true)" /> }
+                else { <p class="meta-text">No reviewer notes recorded.</p> }
+                @if (Meta("reworkContext") is { Length: > 0 } feedback) { <details><summary>Requested change and worker context</summary><RecordedMarkdown Text="@feedback" /></details> }
+                <p class="meta-text">Earlier decisions and run outcomes are retained in History &amp; runs. Missing file anchors are not inferred from prose.</p>
+            </section>
+            }
+        }
+        else if (_section == "Plan & checks")
+        {
+            <section class="card"><h2>Recorded implementation plan</h2>
+                @if (Prop(_task, "status") is "Completed" or "Closed") { <p class="meta-text">This is the historical planning decision. It does not describe a current run or establish delivery.</p> }
+                @if (_delivery?.ExistingSource is not null) { <p>Existing code satisfied the approved criteria through independent verification and review. No new implementation is implied by this plan record.</p> }
+                @if (PlanGate is { } pg)
+                {
+                    <p>@(pg.Approved ? "Execution allowed" : pg.Failed ? "Plan rejected" : "Plan awaiting decision") · @pg.Revisions revision(s)</p>
+                    <div class="task-checks">@foreach (var v in pg.Verdicts) { <div><strong>@WorkPresentation.GateName(v.Gate)</strong><span class="@(WorkPresentation.GateWarning(v.Feedback) ? "task-warning" : "")">@(WorkPresentation.GateWarning(v.Feedback) ? "Allowed with warning" : v.Outcome == "Approve" ? "Passed" : v.Outcome)</span><p>@v.Feedback</p></div> }</div>
+                    <div class="task-plan-sections">@foreach (var part in WorkPresentation.PlanSections(pg.Plan)) { <section><h3>@part.Heading</h3><RecordedMarkdown Text="@part.Body" /></section> }</div>
+                    @if (pg.Plan is { Length: > 0 }) { <details><summary>Original plan</summary><pre class="task-source">@pg.Plan</pre></details> }
+                }
+                else { <p class="meta-text">No signed-off plan recorded.</p> }
+                @if (Meta("qaVerdict") is { } qa) { <h3>QA verification · @qa</h3><RecordedMarkdown Text="@Meta("qaNotes")" /> }
+            </section>
+        }
+        else
+        {
+            <section class="card"><h2>Worker and agent runs</h2>@if (_activityLoading) { <p role="status">Loading task activity…</p> }<p class="meta-text">Agent completion is a model-run outcome. Verification, publication and delivery are separate recorded events.</p>
+                @if (_workerError is not null) { <p class="banner banner--error">Couldn’t load worker attempts: @_workerError</p> }
+                @if (_workers.Count > 0)
+                {
+                    <h3>Worker attempts</h3><p class="meta-text">Latest 100 attempts. Earlier agent runs without an attempt association remain below.</p>
+                    <div class="task-run-list">@foreach (var worker in _workers) { <article><div><strong>@worker.Outcome</strong><span>@WorkPresentation.Role(worker.Role)</span></div><p class="meta-text">@FmtDate(worker.CreatedAt) → @FmtDate(worker.UpdatedAt)</p><p>@(worker.VerificationRecorded ? "Verification receipt recorded" : "No verification receipt recorded")</p>
+                        @if (worker.Phases is { } timing)
+                        {
+                            <dl class="task-facts">
+                                @if (timing.QueueWakeup is { } queue)
+                                {
+                                    <dt>@queue.Label</dt>
+                                    <dd>@Duration(queue.EventAt, queue.ObservedAdmissionAt) <span class="meta-text">Can include time waiting for dependencies or holds.</span></dd>
+                                }
+                                <dt>Dispatch admission to worker start</dt>
+                                <dd>@(timing.EligibleAt is { } admitted && timing.WorkerStartedAt is { } started ? Duration(admitted, started) : "Not recorded")</dd>
+                                <dt>Model &amp; tools</dt>
+                                <dd>@PhaseDuration(timing.ModelStartedAt, timing.ModelCompletedAt, timing.ModelOutcome)</dd>
+                                <dt>Verification</dt>
+                                <dd>@PhaseDuration(timing.VerificationStartedAt, timing.VerificationCompletedAt, timing.VerificationOutcome)</dd>
+                            </dl>
+                        }
+                        else { <p class="meta-text">Phase timings were not recorded for this attempt.</p> }
+                        <details><summary>Attempt identifier</summary><code>@worker.Id</code></details></article> }</div>
+                }
+                @if (WaitDuration("humanReviewWait") is { } humanWait) { <dl class="task-facts"><dt>Human review wait</dt><dd>@humanWait <span class="meta-text">Measured from review-gate observations.</span></dd></dl> }
+                @if (WaitDuration("reviewExternalWait") is { } externalWait) { <dl class="task-facts"><dt>GitHub merge requirement wait</dt><dd>@externalWait</dd></dl> }
+                <h3>Agent runs</h3>
+                @if (_runsError is not null) { <p class="banner banner--error" role="alert">Couldn’t load run history: @_runsError <button class="btn" @onclick="LoadAsync">Retry</button></p> }
+                else if (!_activityLoading && _runs.Count == 0) { <p>No agent runs recorded.</p> }
+                <div class="task-run-list">@foreach (var run in _runs) { <article><div><a href="@($"/runs/{Uri.EscapeDataString(run.Id)}{ProjectQuery(EffectiveProject)}")">@WorkPresentation.Role(run.Role)</a><strong>@WorkPresentation.RunOutcome(run.Status, run.Role)</strong></div><p class="meta-text">@run.StartedAt.ToLocalTime().ToString("MMM d, HH:mm:ss") · @(run.DurationMs is { } ms ? $"{TimeSpan.FromMilliseconds(ms).TotalSeconds:0}s model run" : "Duration not recorded")</p>@if (run.Error is { Length: > 0 }) { <details><summary>Run diagnostic</summary><RecordedMarkdown Text="@run.Error" /></details> }</article> }</div>
+            </section>
+            <section class="card"><h2>Task timeline</h2><p class="meta-text">Repeated identical observations are grouped; they are not separate fix attempts.</p>
+                @if (_historyError is not null) { <p class="banner banner--error">Couldn’t load task history: @_historyError <button class="btn" @onclick="() => LoadHistoryAsync(false)">Retry</button></p> }
+                @if (_historyCursor is not null) { <button class="btn" disabled="@_historyLoading" @onclick="() => LoadHistoryAsync(true)">Load earlier events</button> }
+                <ol class="task-timeline">
                     @foreach (var g in GroupedEvents())
                     {
-                        <tr>
-                            <td class="mono">@g.At</td>
-                            <td class="mono">@g.Kind</td>
-                            <td>
-                                @g.Detail
-                                @if (g.Count > 1)
-                                {
-                                    <span class="pill pill--blocked" title="@($"{g.Count} identical events, {g.FirstAt} → {g.At}")">×@g.Count</span>
-                                }
-                            </td>
-                        </tr>
+                        <li>
+                            <div class="task-timeline-head"><strong>@WorkPresentation.EventName(g.Kind)</strong><time>@FmtDate(g.At)</time></div>
+                            <p class="meta-text">@g.Actor</p>
+                            @if (g.Kind == "sprint_activated" && !string.IsNullOrEmpty(g.Detail))
+                            {
+                                <a href="@SprintLinkFor(g.Detail)">@(g.Detail == Prop(_sprint, "id") ? Prop(_sprint, "name") ?? "Open sprint" : "Open sprint")</a>
+                            }
+                            else
+                            {
+                                <TaskEventDetail Detail="@g.Detail" />
+                            }
+                            @if (g.Count > 1) { <p class="meta-text">@g.Count observations · @FmtDate(g.FirstAt) to @FmtDate(g.At)</p> }
+                            <details><summary>Event source</summary><code>@g.Kind</code></details>
+                        </li>
                     }
-                </tbody>
-            </table>
-        </div>
+                </ol>
+                @if (!_historyLoading && _events.Count == 0) { <p>No events recorded.</p> }
+            </section>
+        }
     }
 </div>
-
 @code {
+    private string? WaitDuration(string prefix)
+    {
+        var recorded = double.TryParse(Meta(prefix + "Seconds"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds) && double.IsFinite(seconds) && seconds >= 0;
+        var active = DateTimeOffset.TryParse(Meta(prefix + "StartedAt"), out var start) && string.IsNullOrEmpty(Meta(prefix + "EndedAt"));
+        if (!recorded && !active) return null;
+        var total = (recorded ? seconds : 0) + (active ? Math.Max(0, (DateTimeOffset.UtcNow - start).TotalSeconds) : 0);
+        return $"{total:0}s{(active ? " · still waiting at this refresh" : "")}";
+    }
+
+    private bool _legacyLoaded, _legacyLoading, _laterCode;
+    private int _legacyIndex, _legacyGeneration;
+    private string? _legacyError;
+    private List<LegacyReview> _legacyReviews = [];
+    private List<string> _legacyNotes = [];
+    private sealed record CodeExcerpt(string HeadSha, string Path, int Line, int EndLine, string Code, string Url);
+    private sealed record LegacyFinding(string Path, int Line, int EndLine, string Body, CodeExcerpt? ReportedCode, CodeExcerpt? LaterCode, string? VerificationNote);
+    private sealed record LegacyReview(int Round, string? HeadSha, string Verdict, string Summary, string Reviewer, string Url, string SubmittedAt, List<LegacyFinding> Findings);
+    private sealed record NativeComment(long Id, string Author, string Path, string Body, string DiffHunk, string Url, string? OriginalHead, long? InReplyToId);
+    private sealed record NativeReview(long Id, string? HeadSha, string Verdict, string Summary, string Reviewer, string? Url, string? SubmittedAt, string Role, List<NativeComment> Comments);
+    private List<NativeReview> _nativeReviews = [];
+    private static string NativeDecisionLabel(string verdict) => verdict switch { "Approved" => "Approval recorded", "ChangesRequested" => "Changes requested at this review", "Dismissed" => "Dismissed review", "Commented" => "Advisory comments", "Pending" => "Pending review", _ => verdict };
+    private sealed record LegacyPage(List<LegacyReview> Reviews, bool Limited, List<string> Notes, List<NativeReview>? NativeReviews = null);
+    private static string CodeLines(CodeExcerpt excerpt) => string.Join('\n', excerpt.Code.Split('\n').Select((line, i) => $"{excerpt.Line + i,4}  {line}"));
+    private void ResetLegacyCode() => _laterCode = false;
+    private async Task SelectSectionAsync(string section)
+    {
+        _section = section;
+        Nav.NavigateTo(Nav.GetUriWithQueryParameter("section", section), replace: true);
+        if (section == "History & runs") await LoadActivityAsync();
+        if (section == "Review" && !_legacyLoaded && !_legacyLoading) await LoadLegacyReviewsAsync();
+    }
+    private async Task LoadLegacyReviewsAsync()
+    {
+        var target = RecoveryTarget;
+        var generation = ++_legacyGeneration;
+        _legacyLoading = true; _legacyError = null;
+        try
+        {
+            var data = await Http.GetFromJsonAsync<LegacyPage>($"/api/tasks/{Uri.EscapeDataString(TaskId)}/review-history?projectId={Uri.EscapeDataString(EffectiveProject ?? "")}");
+            if (target != RecoveryTarget || generation != _legacyGeneration) return;
+            _legacyReviews = data?.Reviews.OrderByDescending(r => r.Round).ToList() ?? [];
+            _nativeReviews = data?.NativeReviews ?? [];
+            _legacyNotes = data?.Notes ?? []; _legacyLoaded = true; _legacyIndex = 0;
+        }
+        catch (Exception ex) { if (target == RecoveryTarget && generation == _legacyGeneration) _legacyError = "Original review history could not be loaded: " + ex.Message; }
+        finally { if (generation == _legacyGeneration) _legacyLoading = false; }
+    }
+    private int _reviewIndex;
+    private static string DecisionLabel(string verdict) => verdict switch { "Approve" => "Approved", "RequestChanges" => "Changes requested", _ => verdict };
+    private List<ReviewRecord> ReviewHistory
+    {
+        get
+        {
+            try { return JsonSerializer.Deserialize<List<ReviewRecord>>(Meta("reviewHistory") ?? "[]", new JsonSerializerOptions(JsonSerializerDefaults.Web))?.Where(r => !_nativeReviews.Any(n => SamePublishedReview(n.Url, r.Url))).OrderByDescending(r => r.Round).ToList() ?? []; }
+            catch (JsonException) { return []; }
+        }
+    }
+    private static bool SamePublishedReview(string? first, string? second) => !string.IsNullOrWhiteSpace(first) && !string.IsNullOrWhiteSpace(second) && string.Equals(first.TrimEnd('/'), second.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+    private string? FindingUrl(string? sha, string? path, int line, string? side)
+    {
+        if (_repoUrl is null || side == "LEFT" || line < 1 || string.IsNullOrWhiteSpace(path)
+            || !System.Text.RegularExpressions.Regex.IsMatch(sha ?? "", "^[a-fA-F0-9]{40}$")) return null;
+        return _repoUrl.TrimEnd('/') + "/blob/" + sha + "/" + string.Join('/', path.Split('/').Select(Uri.EscapeDataString)) + "#L" + line;
+    }
+    private static string? SafeReviewUrl(string? url) => Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https" ? url : null;
+    private sealed record ReviewRecord(int Round, string? HeadSha, string Verdict, string? Summary, string? Reviewer, string? Url, string? SubmittedAt, List<FindingRecord>? Findings);
+    private sealed record FindingRecord(string? Path, int Line, string? Side, string? Body);
+    private string _section = "Overview";
+    private string? _runsError, _holdError;
+    private bool _holdSaving, _historyLoading;
+    private bool _explicitHumanHold, _holdLoaded;
+    private string? _humanPolicy;
+    private string? _historyCursor, _historyError;
+    private string? _workerError;
+    private List<WorkerSummary> _workers = [];
+    private sealed record WorkerSummary(string Id, string Role, string State, string CreatedAt, string UpdatedAt, bool VerificationRecorded, string? Outcome, PhaseTimes? Phases);
+    private sealed record PhaseTimes(
+        DateTimeOffset? ModelStartedAt,
+        DateTimeOffset? ModelCompletedAt,
+        DateTimeOffset? VerificationStartedAt,
+        DateTimeOffset? VerificationCompletedAt,
+        DateTimeOffset? EligibleAt = null,
+        DateTimeOffset? WorkerStartedAt = null,
+        string? ModelOutcome = null,
+        string? VerificationOutcome = null,
+        QueueObservation? QueueWakeup = null);
+
+    private sealed record QueueObservation(string Cause, DateTimeOffset EventAt, DateTimeOffset ObservedAdmissionAt)
+    {
+        public string Label => Cause switch
+        {
+            "active-sprint-selection" => "Sprint activation to dispatch admission",
+            "task-status-returned-to-pending" => "Requeue to dispatch admission",
+            _ => "Queue event to dispatch admission"
+        };
+    }
+
+    private static string PhaseDuration(DateTimeOffset? start, DateTimeOffset? end, string? outcome)
+    {
+        if (start is null) return "Start time not recorded";
+        if (end is null) return "Started · finish time not recorded";
+        if (end < start) return "Timing unavailable";
+
+        var duration = Duration(start.Value, end.Value);
+        return outcome switch
+        {
+            "failed" => $"Failed after {duration}",
+            "cancelled" => $"Cancelled after {duration}",
+            "timed-out" => $"Timed out after {duration}",
+            _ => duration
+        };
+    }
+    private static string Duration(DateTimeOffset start, DateTimeOffset end)
+    {
+        var elapsed = end - start;
+        if (elapsed < TimeSpan.Zero) return "Timing unavailable";
+        if (elapsed > TimeSpan.Zero && elapsed < TimeSpan.FromMilliseconds(1)) return "Under 1 ms";
+        if (elapsed > TimeSpan.Zero && elapsed < TimeSpan.FromSeconds(1)) return $"{elapsed.TotalMilliseconds:0} ms";
+        return $"{elapsed.TotalSeconds:0.#}s";
+    }
+    private sealed record WorkerPage(bool Available, List<WorkerSummary> Attempts);
+    private async Task LoadHistoryAsync(bool earlier)
+    {
+        var target = RecoveryTarget;
+        var generation = _activityGeneration;
+        var token = _activityRequest?.Token ?? CancellationToken.None;
+        _historyLoading = true;
+        try
+        {
+            var url = $"/api/tasks/{Uri.EscapeDataString(TaskId)}/history?projectId={Uri.EscapeDataString(EffectiveProject ?? "")}" + (earlier && _historyCursor is not null ? "&cursor=" + Uri.EscapeDataString(_historyCursor) : "");
+            var data = await Http.GetFromJsonAsync<JsonElement>(url, token);
+            if (target != RecoveryTarget || generation != _activityGeneration) return;
+            var events = data.GetProperty("events").EnumerateArray().Select(e => new EventVm(Prop(e, "at") ?? "", Prop(e, "kind") ?? "", Prop(e, "detail") ?? "", Prop(e, "actor") ?? "Actor not recorded")).Reverse().ToList();
+            if (earlier) _events.InsertRange(0, events); else _events = events;
+            _historyCursor = Prop(data, "nextCursor"); _historyError = null;
+        }
+        catch (Exception ex) { if (target == RecoveryTarget && generation == _activityGeneration) _historyError = ex.Message; }
+        finally { if (generation == _activityGeneration) _historyLoading = false; }
+    }
+    private string? EffectiveProject => Project ?? ShellStore.Value.CurrentProjectId;
+    private string SprintLink => SprintLinkFor(Prop(_sprint, "id"));
+    private string SprintLinkFor(string? sprintId) => "/sprints?project=" + Uri.EscapeDataString(EffectiveProject ?? "") + "&sprint=" + Uri.EscapeDataString(sprintId ?? "");
+    private string? NominatedHuman => Situation("nominatedHuman");
+    private bool IsTerminal => Prop(_task, "status") is "Completed" or "Closed";
+    private bool HumanReviewRequired => bool.TryParse(Meta("humanReviewRequired"), out var held) && held;
+    private string? Situation(string key) => _task is { } task && task.TryGetProperty("situation", out var situation) ? Prop(situation, key) : key == "label" ? Prop(_task, "status") : null;
+    private string ReviewLabel => Meta("reviewVerdict") switch { "Approve" => "Approved", "RequestChanges" => "Changes requested", null => "Review not recorded", var verdict => verdict };
+    private async Task ToggleHumanReviewAsync()
+    {
+        if (!CanActOnLoadedTask || !_holdLoaded) return;
+        _holdSaving = true; _holdError = null;
+        try
+        {
+            var response = await Http.PutAsJsonAsync($"/api/tasks/{Uri.EscapeDataString(TaskId)}/human-review?projectId={Uri.EscapeDataString(EffectiveProject ?? "")}", new { required = !_explicitHumanHold });
+            if (!response.IsSuccessStatusCode) _holdError = $"Review requirement was not saved: {await response.Content.ReadAsStringAsync()}";
+            else await LoadAsync();
+        }
+        catch (Exception ex) { _holdError = ex.Message; }
+        finally { _holdSaving = false; }
+    }
     private static string FmtDate(string? iso) =>
-        DateTime.TryParse(iso, out var d) ? d.ToString("yyyy-MM-dd HH:mm") : iso ?? "—";
+        DateTime.TryParse(iso, out var d) ? d.ToLocalTime().ToString("MMM d, yyyy HH:mm") : iso ?? "Time not recorded";
 
     [Parameter] public string TaskId { get; set; } = "";
     // Cross-project links (the unified /now feed, alert inbox) carry
     // the item's OWNING project — it wins over the topbar lens (task
     // ids collide across projects).
     [Parameter][SupplyParameterFromQuery(Name = "project")] public string? Project { get; set; }
+    [Parameter][SupplyParameterFromQuery(Name = "section")] public string? Section { get; set; }
 
     private JsonElement? _task;
     private StateVm? _state;
@@ -344,6 +413,17 @@
     private List<RunVm> _runs = new();
     private string? _repoUrl;
     private string? _error;
+    private string? _loadedRecoveryTarget, _requestedRecoveryTarget;
+    private string? _regroomNotice, _regroomNoticeTarget;
+    private async Task RegroomRequestedAsync()
+    {
+        _regroomNoticeTarget = RecoveryTarget;
+        _regroomNotice = "Technical review requested. Normal grooming will reconsider this task; engineering has not been started.";
+        await LoadAsync();
+    }
+    private int _recoveryLoadGeneration;
+    private bool CanActOnLoadedTask => _loadedRecoveryTarget == RecoveryTarget && _error is null;
+    private string RecoveryTarget => (Project ?? ShellStore.Value.CurrentProjectId) + "|" + TaskId;
 
     private string StatusCss => Prop(_task, "status")?.ToLowerInvariant() ?? "unknown";
 
@@ -355,62 +435,160 @@
         EventGroup? cur = null;
         foreach (var e in _events)
         {
-            if (cur is not null && cur.Kind == e.Kind && cur.Detail == e.Detail)
+            if (cur is not null && cur.Kind == e.Kind && cur.Detail == e.Detail && cur.Actor == e.Actor)
             {
                 cur = cur with { At = e.At, Count = cur.Count + 1 };
                 continue;
             }
             if (cur is not null) yield return cur;
-            cur = new EventGroup(e.At, e.At, e.Kind, e.Detail, 1);
+            cur = new EventGroup(e.At, e.At, e.Kind, e.Detail, 1, e.Actor);
         }
         if (cur is not null) yield return cur;
     }
 
-    private sealed record EventGroup(string FirstAt, string At, string Kind, string Detail, int Count);
+    private sealed record EventGroup(string FirstAt, string At, string Kind, string Detail, int Count, string Actor);
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
-
-    private async Task LoadAsync()
+    protected override async Task OnParametersSetAsync()
     {
-        _error = null;
+        if (_requestedRecoveryTarget == RecoveryTarget)
+        {
+            _section = Section is "Review" or "Plan & checks" or "History & runs" ? Section : "Overview";
+            if (_section == "History & runs") await LoadActivityAsync();
+            else if (_section == "Review" && !_legacyLoaded && !_legacyLoading) await LoadLegacyReviewsAsync();
+            return;
+        }
+        _requestedRecoveryTarget = RecoveryTarget;
+        ++_retryGeneration; _resetting = false; _retryError = null;
+        InvalidateActivity();
+        _section = Section is "Review" or "Plan & checks" or "History & runs" ? Section : "Overview"; _delivery = null; _repoUrl = null;
+        _task = null; _state = null; _sprint = null; _runs.Clear(); _events.Clear(); _workers.Clear();
+        _historyCursor = null; _historyError = null; _workerError = null; _runsError = null; _holdError = null;
+        _holdLoaded = false;
+        ++_legacyGeneration; _legacyLoading = false; _legacyLoaded = false; _legacyReviews.Clear(); _nativeReviews.Clear(); _legacyNotes.Clear(); _legacyError = null;
+        _closeOpen = false; _closeReason = ""; _closeResult = null;
+        if (PersistentState.TryTakeFromJson<OverviewSnapshot>("forge-task-overview:" + RecoveryTarget, out var snapshot) && snapshot is not null)
+        {
+            _task = snapshot.Task; _repoUrl = snapshot.Repository;
+            _holdLoaded = snapshot.HoldLoaded; _explicitHumanHold = snapshot.ExplicitHold;
+            _humanPolicy = snapshot.HumanPolicy; _holdError = snapshot.HoldError;
+            _delivery = snapshot.Task.TryGetProperty("delivery", out var delivery) && delivery.ValueKind == JsonValueKind.Object
+                ? delivery.Deserialize<TaskDeliveryRead>(JsonSerializerOptions.Web) : null;
+            _sprint = snapshot.Task.TryGetProperty("sprint", out var sprint) && sprint.ValueKind == JsonValueKind.Object ? sprint : null;
+            _loadedRecoveryTarget = RecoveryTarget;
+            if (snapshot.Review is { } review)
+            {
+                _legacyReviews = review.Legacy; _nativeReviews = review.Native; _legacyNotes = review.Notes;
+                _legacyError = review.Error; _legacyLoaded = true;
+            }
+            if (snapshot.Activity is { } activity)
+            {
+                _events = activity.Events; _workers = activity.Workers; _runs = activity.Runs; _state = activity.State;
+                _historyCursor = activity.Cursor; _historyError = activity.HistoryError;
+                _workerError = activity.WorkerError; _runsError = activity.RunsError; _activityLoaded = true;
+            }
+            if (_section == "History & runs") await LoadActivityAsync();
+            else if (_section == "Review" && !_legacyLoaded && !_legacyLoading) await LoadLegacyReviewsAsync();
+            return;
+        }
+        await LoadAsync();
+    }
+
+    private PersistingComponentStateSubscription _persisting;
+    private sealed record OverviewSnapshot(JsonElement Task, string? Repository, bool HoldLoaded,
+        bool ExplicitHold, string? HumanPolicy, string? HoldError, ReviewSnapshot? Review = null, ActivitySnapshot? Activity = null);
+    private sealed record ReviewSnapshot(List<LegacyReview> Legacy, List<NativeReview> Native, List<string> Notes, string? Error);
+    private sealed record ActivitySnapshot(List<EventVm> Events, List<WorkerSummary> Workers, List<RunVm> Runs,
+        StateVm? State, string? Cursor, string? HistoryError, string? WorkerError, string? RunsError);
+    private OverviewSnapshot CaptureOverviewSnapshot(JsonElement task) => new(task, _repoUrl, _holdLoaded, _explicitHumanHold,
+        _humanPolicy, _holdError,
+        !_legacyLoading && (_legacyLoaded || _legacyError is not null)
+            ? new(_legacyReviews, _nativeReviews, _legacyNotes, _legacyError) : null,
+        _activityLoaded && !_activityLoading
+            ? new(_events, _workers, _runs, _state, _historyCursor, _historyError, _workerError, _runsError) : null);
+    protected override void OnInitialized() => _persisting = PersistentState.RegisterOnPersisting(() =>
+    {
+        if (_task is { } task && _loadedRecoveryTarget == RecoveryTarget && _error is null)
+        {
+            var snapshot = CaptureOverviewSnapshot(task);
+            // Persisted prerender state travels back in the initial circuit-start message.
+            // Large review/history payloads must use normal interactive reads instead of
+            // disconnecting the entire page. Keep room for framework encoding/other state;
+            // do not truncate task data or increase the global transport limit.
+            if (JsonSerializer.SerializeToUtf8Bytes(snapshot).Length <= 8 * 1024)
+                PersistentState.PersistAsJson("forge-task-overview:" + RecoveryTarget, snapshot);
+        }
+        return Task.CompletedTask;
+    });
+    public void Dispose() { _persisting.Dispose(); ++_recoveryLoadGeneration; ++_legacyGeneration; InvalidateActivity(); }
+    private bool _activityLoaded, _activityLoading;
+    private int _activityGeneration;
+    private CancellationTokenSource? _activityRequest;
+    private void InvalidateActivity()
+    {
+        ++_activityGeneration;
+        _activityRequest?.Cancel(); _activityRequest?.Dispose(); _activityRequest = null;
+        _activityLoaded = false; _activityLoading = false; _historyLoading = false;
+    }
+    private async Task LoadActivityAsync()
+    {
+        if (_activityLoading || _activityLoaded || _task is null) return;
+        var generation = ++_activityGeneration;
+        var target = RecoveryTarget;
+        _activityRequest = new();
+        var token = _activityRequest.Token;
+        _activityLoading = true;
         try
         {
-            var projectId = Project ?? ShellStore.Value.CurrentProjectId;
-            var url = string.IsNullOrEmpty(projectId)
-                ? $"/api/tasks/{TaskId}"
-                : $"/api/tasks/{TaskId}?projectId={Uri.EscapeDataString(projectId)}";
-            var doc = await Http.GetFromJsonAsync<JsonElement>(url);
-            _task = doc;
-            _sprint = doc.ValueKind == JsonValueKind.Object && doc.TryGetProperty("sprint", out var sp) && sp.ValueKind == JsonValueKind.Object
-                ? sp : null;
-            _events = doc.TryGetProperty("events", out var evs)
-                ? evs.EnumerateArray().Select(e => new EventVm(
-                    Prop(e, "at") ?? "", Prop(e, "kind") ?? "", Prop(e, "detail") ?? "")).ToList()
-                : new List<EventVm>();
-            _events.Reverse(); // API returns newest-first; show oldest-first
+            await Task.WhenAll(LoadHistoryAsync(false),
+                LoadWorkersAsync(target, generation, TaskId, EffectiveProject, token),
+                LoadStateAsync(target, generation, TaskId, EffectiveProject, token),
+                LoadRunsAsync(target, generation, TaskId, EffectiveProject, token));
+            if (generation == _activityGeneration && target == RecoveryTarget) _activityLoaded = true;
+        }
+        finally { if (generation == _activityGeneration && target == RecoveryTarget) _activityLoading = false; }
+    }
+    private async Task LoadWorkersAsync(string recoveryTarget, int recoveryGeneration, string taskId, string? projectId, CancellationToken token)
+    {
+            try
+            {
+                var workers = await Http.GetFromJsonAsync<WorkerPage>($"/api/tasks/{Uri.EscapeDataString(taskId)}/workers?projectId={Uri.EscapeDataString(projectId ?? "")}", token);
+                if (recoveryTarget != RecoveryTarget || recoveryGeneration != _activityGeneration) return;
+                _workers = workers?.Attempts ?? []; _workerError = null;
+            }
+            catch (Exception ex) { if (recoveryTarget == RecoveryTarget && recoveryGeneration == _activityGeneration) _workerError = ex.Message; }
 
+
+    }
+    private async Task LoadStateAsync(string recoveryTarget, int recoveryGeneration, string taskId, string? projectId, CancellationToken token)
+    {
             // Derived lifecycle state (what it's doing + waiting on).
             try
             {
                 var stateUrl = string.IsNullOrEmpty(projectId)
-                    ? $"/api/tasks/{TaskId}/state"
-                    : $"/api/tasks/{TaskId}/state?projectId={Uri.EscapeDataString(projectId)}";
-                var sd = await Http.GetFromJsonAsync<JsonElement>(stateUrl);
+                    ? $"/api/tasks/{taskId}/state"
+                    : $"/api/tasks/{taskId}/state?projectId={Uri.EscapeDataString(projectId)}";
+                var sd = await Http.GetFromJsonAsync<JsonElement>(stateUrl, token);
+                if (recoveryTarget != RecoveryTarget || recoveryGeneration != _activityGeneration) return;
                 _state = new StateVm(
                     Prop(sd, "state") ?? "", Prop(sd, "substate"), Prop(sd, "waitingOn") ?? "",
                     sd.TryGetProperty("strikes", out var st) && st.TryGetInt32(out var si) ? si : 0,
                     sd.TryGetProperty("maxStrikes", out var ms) && ms.TryGetInt32(out var msi) ? msi : 3);
             }
-            catch { _state = null; /* state is additive */ }
+            catch { if (recoveryTarget == RecoveryTarget && recoveryGeneration == _activityGeneration) _state = null; /* state is additive */ }
 
+
+    }
+    private async Task LoadRunsAsync(string recoveryTarget, int recoveryGeneration, string taskId, string? projectId, CancellationToken token)
+    {
             // Agent runs for this task (the "who worked on this and
             // what did they actually do" trail). Same shape as /runs.
             try
             {
                 var runsUrl = string.IsNullOrEmpty(projectId)
-                    ? $"/api/agent-runs?taskId={Uri.EscapeDataString(TaskId)}"
-                    : $"/api/agent-runs?taskId={Uri.EscapeDataString(TaskId)}&projectId={Uri.EscapeDataString(projectId)}";
-                var runsDoc = await Http.GetFromJsonAsync<JsonElement>(runsUrl);
+                    ? $"/api/agent-runs?taskId={Uri.EscapeDataString(taskId)}"
+                    : $"/api/agent-runs?taskId={Uri.EscapeDataString(taskId)}&projectId={Uri.EscapeDataString(projectId)}";
+                var runsDoc = await Http.GetFromJsonAsync<JsonElement>(runsUrl, token);
+                if (recoveryTarget != RecoveryTarget || recoveryGeneration != _activityGeneration) return;
                 var runs = new List<RunVm>();
                 foreach (var bucket in new[] { "active", "recent" })
                 {
@@ -439,49 +617,109 @@
                 // review that started before a dev run but failed
                 // after it succeeded is the more recent event.
                 _runs = runs.OrderByDescending(r => r.FinishedAt ?? r.LastActivityAt ?? r.StartedAt).ToList();
+                _runsError = null;
             }
-            catch { /* runs are additive — never break the task page */ }
-            if (_repoUrl is null && !string.IsNullOrEmpty(projectId))
+            catch (Exception ex) { if (recoveryTarget == RecoveryTarget && recoveryGeneration == _activityGeneration) _runsError = ex.Message; }
+
+    }
+
+    private async Task LoadAsync()
+    {
+        var recoveryTarget = RecoveryTarget;
+        var taskId = TaskId;
+        var recoveryGeneration = ++_recoveryLoadGeneration;
+        InvalidateActivity();
+        ++_legacyGeneration; _legacyLoaded = false; _legacyLoading = false;
+        _loadedRecoveryTarget = null;
+        _error = null;
+        try
+        {
+            var projectId = Project ?? ShellStore.Value.CurrentProjectId;
+            var url = string.IsNullOrEmpty(projectId)
+                ? $"/api/tasks/{Uri.EscapeDataString(taskId)}?includeEvents=false"
+                : $"/api/tasks/{Uri.EscapeDataString(taskId)}?includeEvents=false&projectId={Uri.EscapeDataString(projectId)}";
+            var doc = await Http.GetFromJsonAsync<JsonElement>(url);
+            if (recoveryTarget != RecoveryTarget || recoveryGeneration != _recoveryLoadGeneration) return;
+            _task = doc;
+            _delivery = doc.TryGetProperty("delivery", out var delivery) && delivery.ValueKind == JsonValueKind.Object
+                ? delivery.Deserialize<TaskDeliveryRead>(JsonSerializerOptions.Web) : null;
+            try
+            {
+                var hold = await Http.GetFromJsonAsync<JsonElement>($"/api/tasks/{Uri.EscapeDataString(taskId)}/human-review?projectId={Uri.EscapeDataString(projectId ?? "")}");
+                if (recoveryTarget != RecoveryTarget || recoveryGeneration != _recoveryLoadGeneration) return;
+                _explicitHumanHold = hold.TryGetProperty("required", out var required) && required.ValueKind == JsonValueKind.True;
+                _humanPolicy = Prop(hold, "mode"); _holdLoaded = true; _holdError = null;
+            }
+            catch (Exception ex) { if (recoveryTarget == RecoveryTarget && recoveryGeneration == _recoveryLoadGeneration) { _holdLoaded = false; _holdError = "Couldn’t load the review requirement: " + ex.Message; } }
+            _sprint = doc.ValueKind == JsonValueKind.Object && doc.TryGetProperty("sprint", out var sp) && sp.ValueKind == JsonValueKind.Object
+                ? sp : null;
+            if (recoveryTarget != RecoveryTarget || recoveryGeneration != _recoveryLoadGeneration) return;
+            _repoUrl = null;
+            if (!string.IsNullOrEmpty(projectId))
             {
                 var projects = await Http.GetFromJsonAsync<JsonElement>("/api/projects");
+                if (recoveryTarget != RecoveryTarget || recoveryGeneration != _recoveryLoadGeneration) return;
                 foreach (var p in projects.EnumerateArray())
                 {
                     if (string.Equals(Prop(p, "id"), projectId, StringComparison.OrdinalIgnoreCase))
                     {
-                        _repoUrl = Prop(p, "repoUrl")?.TrimEnd('/');
+                        if (projectId == (Project ?? ShellStore.Value.CurrentProjectId))
+                            _repoUrl = RepositoryLinks.WebUrl(Prop(p, "repoUrl"));
                         break;
                     }
                 }
             }
         }
-        catch (Exception ex) { _error = ex.Message; }
+        catch (Exception ex)
+        {
+            if (recoveryTarget == RecoveryTarget && recoveryGeneration == _recoveryLoadGeneration) _error = ex.Message;
+        }
+        if (_error is null && recoveryTarget == RecoveryTarget && recoveryGeneration == _recoveryLoadGeneration)
+        {
+            _loadedRecoveryTarget = recoveryTarget;
+            if (_section == "History & runs") await LoadActivityAsync();
+            else if (_section == "Review" && !_legacyLoaded && !_legacyLoading) await LoadLegacyReviewsAsync();
+        }
     }
 
     private static string ProjectQuery(string? projectId) =>
         projectId is null ? "" : $"?project={Uri.EscapeDataString(projectId)}";
 
     private bool _resetting;
-
-    /// <summary>Operator recovery nudge: clear every strike counter
-    /// and requeue (POST /api/tasks/{id}/reset-strikes).</summary>
-    private async Task ResetStrikesAsync()
+    private int _retryGeneration;
+    private string? _retryError;
+    private sealed record RetryFailure(string? Error, string? Detail);
+    private async Task RetryAsync()
     {
+        if (!CanActOnLoadedTask || _resetting) return;
+        var generation = ++_retryGeneration;
         _resetting = true;
+        _retryError = null;
         try
         {
             var projectId = Project ?? ShellStore.Value.CurrentProjectId;
+            var retryAction = Meta("blockedKind") == "review-integration" ? "requeue" : "reset-strikes";
             var url = string.IsNullOrEmpty(projectId)
-                ? $"/api/tasks/{TaskId}/reset-strikes"
-                : $"/api/tasks/{TaskId}/reset-strikes?projectId={Uri.EscapeDataString(projectId)}";
-            var resp = await Http.PostAsync(url, content: null);
+                ? $"/api/tasks/{TaskId}/{retryAction}"
+                : $"/api/tasks/{TaskId}/{retryAction}?projectId={Uri.EscapeDataString(projectId)}";
+            using var resp = await Http.PostAsync(url, content: null);
             if (!resp.IsSuccessStatusCode)
             {
-                _error = $"strike reset failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                var message = $"Retry failed (HTTP {(int)resp.StatusCode}).";
+                if (resp.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) is true)
+                {
+                    var reason = await resp.Content.ReadFromJsonAsync<RetryFailure>();
+                    message = $"Retry failed. {reason?.Error ?? reason?.Detail ?? resp.ReasonPhrase}";
+                }
+                if (generation == _retryGeneration) _retryError = message;
             }
         }
-        catch (Exception ex) { _error = ex.Message; }
-        finally { _resetting = false; }
-        await LoadAsync();
+        catch (Exception ex)
+        {
+            if (generation == _retryGeneration) _retryError = "Couldn’t confirm the retry. " + ex.Message;
+        }
+        finally { if (generation == _retryGeneration) _resetting = false; }
+        if (generation == _retryGeneration) await LoadAsync();
     }
 
     private bool _closeOpen;
@@ -494,6 +732,7 @@
     /// retires the task; optionally closes the linked PR unmerged.</summary>
     private async Task CloseTaskAsync()
     {
+        if (!CanActOnLoadedTask) return;
         _closing = true;
         _closeResult = null;
         try
@@ -523,6 +762,7 @@
         await LoadAsync();
     }
 
+    private TaskDeliveryRead? _delivery;
     private string? Meta(string key)
     {
         if (_task is null || _task.Value.ValueKind != JsonValueKind.Object) return null;
@@ -531,7 +771,7 @@
     }
 
     private string? PrUrl(string prNumber) =>
-        _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+        RepositoryLinks.PullRequest(_repoUrl, prNumber);
 
     private static string TriageTone(string action) => action switch
     {
@@ -587,7 +827,7 @@
         };
     }
 
-    private sealed record EventVm(string At, string Kind, string Detail);
+    private sealed record EventVm(string At, string Kind, string Detail, string Actor);
 
     private sealed record StateVm(string State, string? Substate, string WaitingOn, int Strikes, int MaxStrikes);
 

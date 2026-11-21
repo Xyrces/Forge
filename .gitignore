@@ -16,3 +16,5 @@ spec_payload.json
 spec_por1115.json
 verify.txt
 .test-temp/
+__pycache__/
+*.pyc

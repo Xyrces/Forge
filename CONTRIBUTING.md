@@ -1,55 +1,42 @@
 ﻿# Contributing
 
-How the code is organized, what conventions to follow, and what to read first.
+For your first checkout, start with [Build and test the code](docs/getting-started.md#build-and-test-the-code). Use this guide for module boundaries, testing patterns, and conventions.
 
 ## Module layout
 
-```
-Forge/
-├── Agents/                    # MAF agent implementations (Intake, Product, Groomer, Runner)
-│   ├── MafAgentRunner.cs      # MAF ChatClientAgent + tool plumbing
-│   ├── GroomerAgent.cs        # Spec -> stories+tasks decomposition
-│   └── RoleAgentRegistry.cs   # task-type -> role mapping
-├── AgentTools/                # AIFunctions exposed to the agent
-│   └── BashTool.cs            # cmd.exe /c <command> with timeout
-├── Core/                      # Domain types + stores (no I/O concerns beyond DB)
-│   ├── IssueStore.cs          # SQLite: issue + issue_dep + issue_event (schema v7)
-│   ├── MemoryStore.cs         # SQLite: memory (schema v7, lives in IssueStore's migration)
-│   ├── SpecStore.cs           # specs + versions
-│   ├── IssueEventRecord.cs    # event-log row
-│   └── IssueDepTests/         # adjacency helpers
-├── Configuration/             # appsettings.json shape
-├── Dashboard/                 # Kestrel + static HTML + minimal-API endpoints
-│   ├── DashboardHost.cs       # WebApplication composition root
-│   ├── DashboardEndpoints.cs  # /api/state + /api/state/issues/{id}
-│   ├── SpecEndpoints.cs       # /api/specs + /api/specs/{id}/groom
-│   ├── MemoryEndpoints.cs     # /api/memory
-│   ├── IssuesJsonlEndpoints.cs# /api/issues.jsonl streaming
-│   └── wwwroot/index.html     # single-file SPA
-├── Orchestrator/              # Dispatch loop + PR watch
-│   ├── OrchestratorAgent.cs   # sequential dispatch (production path)
-│   ├── Workflow/              # MAF Workflows implementation (parallel)
-│   │   ├── EngineeringDispatchWorkflow.cs
-│   │   ├── ClaimExecutor.cs
-│   │   ├── WorktreeExecutor.cs
-│   │   ├── RunAgentExecutor.cs
-│   │   ├── CommitPushPrExecutor.cs
-│   │   └── EnqueueWatchExecutor.cs
-│   └── PRWatcher.cs
-├── Reviewer/                  # Future: code-review agent
-├── Program.cs                 # CLI entry point
-└── appsettings.json           # gitignored; copy from appsettings.example.json
-```
+| Directory | What lives there |
+| --- | --- |
+| [Core](Core/) | Domain types, issue and memory stores, and the database provider interfaces. |
+| [Agents](Agents/) and [AgentTools](AgentTools/) | Role definitions, prompts, model calls, and the tools agents can use. |
+| [Orchestrator](Orchestrator/) | Planning, dispatch, worker coordination, PR review, and recovery. |
+| [Dashboard](Dashboard/) and [Forge.UI](Forge.UI/) | The HTTP API, live events, and the Blazor user interface. |
+| [Messaging](Messaging/) | Talaria event publication and delivery. |
+| [DeploymentPipeline](DeploymentPipeline/) and [deploy/k3s](deploy/k3s/) | Deployment decisions, the installer, and release Jobs. |
+| [Configuration](Configuration/) and [Program.cs](Program.cs) | Settings and application startup. |
 
 ## Boundaries
 
-- **Core/ has no I/O beyond the SQLite DB.** Stores expose `Task`-returning methods, but no HTTP, no GitHub, no LLM. The store classes take their paths via the constructor; they don't read env vars.
+- **Core/ has no I/O beyond the state database.** Stores expose `Task`-returning methods, but no HTTP, no GitHub, no LLM. The store classes take their paths via the constructor; they don't read env vars.
 - **Agents/ depends on Core/ + Configuration/ + Dashboard/.** They publish `DashboardEvent` and call into stores. They don't read `appsettings.json` directly.
 - **Orchestrator/ depends on Agents/ + Core/.** The dispatch loop's job is to glue stores + agent + git + GitHub together.
 - **Dashboard/ depends on Core/ + Configuration/.** It reads stores and publishes/subscribes events. The `IDashboardEventBus` interface keeps the boundary clean.
 - **Reviewer/ is empty today.** It's reserved for the future designer / artist agent roles.
 
 If a new class needs to read `IOptions<AgentOptions>` AND write to `IssueStore` AND make HTTP calls, that's a code smell — split the responsibilities across Core / Agents / Orchestrator.
+
+## Privacy check for pull requests
+
+The **Repository privacy** check reads the PR title and description, then scans new filenames, added text, and commit messages in every commit a PR would bring into `main`. This includes a value added in one commit and removed in the next. Author and committer details are also checked for known private identifiers. Use `$HOME` for a home directory, `example-user` for an account, and `<resource-group>` for an Azure resource. Supply real deployment values through private configuration.
+
+A finding lists the commit, file, line and category where possible. The log withholds sensitive filenames and matched text. Resolve the finding on the PR branch. If an earlier PR commit contains a real value, remove it from the branch's proposed history as well. A proposed PR is already visible on GitHub, so run the check locally before pushing when working with installation data:
+
+```sh
+python3 scripts/check_pr_privacy.py origin/main HEAD
+```
+
+Local runs use the built-in patterns. The hosted check also reads `FORGE_PRIVATE_TERMS`, a repository Actions secret containing a JSON array of specific account, host and resource identifiers. Administrators can update it from a private file with `gh secret set FORGE_PRIVATE_TERMS < identifiers.json`. The hosted check fails if the list is missing or invalid. To recheck an existing PR after a policy change, run the **PR privacy** workflow on `main` with its PR number.
+
+The scanner reads Git objects using the policy on `main`. It checks binary filenames, skips binary payloads, and reports an error for files over 16 MiB. Use Git LFS for large assets. GitHub secret scanning and push protection cover supported credential formats separately.
 
 ## Conventions
 
@@ -167,16 +154,9 @@ AIFunctions are how the model invokes code on the host. To add one:
 - `_host.Start()` + `HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") }` + `Dispose` in the test's `Dispose`.
 - Pre-seed the DB on disk if your test depends on existing state.
 
-### Live demo
+### Try the workflow
 
-After a non-trivial change, run the live demo:
-1. Wipe the DB (`rm .portHorizon/state/issues.db*`).
-2. Start the orchestrator.
-3. Enqueue a task.
-4. Watch the dashboard + JSONL file.
-5. Confirm the PR was opened.
-
-The live demo is the most thorough test. It exercises the full pipeline end-to-end, including things unit tests don't catch (process startup order, file locking, network timing, model behavior).
+Use the [end-to-end harness](docs/e2e-harness.md) to run an engineering task against a temporary repository and follow it through review and merge. For a change that needs a real dashboard or deployment check, use a dedicated test project or environment and verify the behavior there. Keep shared project data intact.
 
 ## Things to avoid
 
@@ -188,17 +168,8 @@ The live demo is the most thorough test. It exercises the full pipeline end-to-e
 
 ## Reading order if you're new
 
-1. `docs/system-flow.md` — what runs when a task is dispatched
-2. `docs/vision-status.md` — what each phase of the design doc looks like in the live system
-3. `docs/operator-cookbook.md` — how an operator uses it
-4. `Program.cs` — the CLI entry point
-5. `Core/IssueStore.cs` — the heart of the system; everything else hangs off this
-6. `Orchestrator/OrchestratorAgent.cs::DispatchSingleTaskAsync` — the dispatch loop
-7. `Agents/MafAgentRunner.cs` — how the agent runs
-8. `Orchestrator/Workflow/EngineeringDispatchWorkflow.cs` — the MAF-Workflows version (parallel impl, dormant)
-9. `Dashboard/DashboardHost.cs` — how the HTTP surface composes
-10. The test suite — `tests/Forge.Tests/IssueStoreTests.cs` is the best entry point
+1. Follow one initiative through [the dashboard](docs/user-guide.md).
+2. Read [system flow](docs/system-flow.md), then follow a task through [the dispatch workflow](Orchestrator/Workflow/EngineeringDispatchWorkflow.cs) and [the agent runner](Agents/MafAgentRunner.cs).
+3. Pick a component and read its tests. For a small starting point, see [the issue store tests](tests/Forge.Tests/IssueStoreTests.cs).
 
-## Asking for help
-
-If you're stuck, the first thing to do is run `dotnet run --project Forge -- --check`. If that passes, the bug is somewhere in the dispatch path. If it fails, the failure message will tell you which subsystem to investigate.
+For a startup problem, use the [preflight command and diagnostics](docs/runtime-reference.md#command-line). For other topics, see the [documentation index](docs/README.md).

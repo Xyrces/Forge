@@ -41,6 +41,8 @@ public sealed class DesignerAgent
     private readonly ILogger<DesignerAgent> _logger;
     private readonly string _runId;
     private readonly string _rolePromptsRoot;
+    private ISpecStore? _artifactReadSpecs;
+    private DesignArtifactStore? _historicalArtifacts;
 
     public DesignerAgent(
         ISpecStore specs,
@@ -87,6 +89,29 @@ public sealed class DesignerAgent
     public async Task<DesignerResult> DesignSpecAsync(
         string specId, DesignerTriggerKind trigger, CancellationToken ct = default)
     {
+        // The run receipt and artifacts must share the spec's owning database.
+        // In particular, run IDs are only unique inside one project schema.
+        if (_specs is ProjectRoutingSpecStore routing)
+        {
+            var resolved = routing.ResolveOwner(specId);
+            if (resolved is null) return new DesignerResult(false, null, [], null, "Spec not found");
+            var owner = resolved as SpecStore
+                ?? throw new InvalidOperationException("Designer requires the specification's owning database.");
+            var scoped = new DesignerAgent(owner, new DesignArtifactStore(owner.Database),
+                new DesignerRunStore(owner.Database), _memory, _hygiene, _chatClientFactory,
+                _config, _roles, _events, _logger, _rolePromptsRoot, _runId)
+            {
+                _artifactReadSpecs = routing,
+                _historicalArtifacts = _artifacts,
+            };
+            return await scoped.DesignOwnedSpecAsync(specId, trigger, ct);
+        }
+        return await DesignOwnedSpecAsync(specId, trigger, ct);
+    }
+
+    private async Task<DesignerResult> DesignOwnedSpecAsync(
+        string specId, DesignerTriggerKind trigger, CancellationToken ct)
+    {
         var run = await _runs.StartAsync(specId, trigger, ct);
         var startedAt = DateTime.UtcNow;
         _logger.LogInformation("Designer: starting run {RunId} for spec {SpecId} (trigger={Trigger})",
@@ -123,6 +148,16 @@ public sealed class DesignerAgent
         }
         catch (Exception ex)
         {
+            // The tool may have committed before the model's final turn failed
+            // or grooming advanced. Its receipt is the handoff authority.
+            var committed = await _runs.ReadCommittedDecisionAsync(run.Id, CancellationToken.None);
+            if (committed is not null)
+            {
+                _logger.LogWarning(ex, "Designer: model ended after committed handoff for {SpecId}", specId);
+                _events.Publish(DesignerEventEmitter.Build(DateTime.UtcNow,
+                    DesignerEventKind.RunCompleted, specId, _runId, trigger, committed.Status.ToString()));
+                return new DesignerResult(true, committed.Status, committed.ArtifactIds, null, null);
+            }
             _logger.LogError(ex, "Designer: spec {SpecId} crashed", specId);
             return await FinishFailureAsync(run.Id, specId, "llm crashed", startedAt, ct,
                 $"{ex.GetType().Name}: {ex.Message}");
@@ -141,7 +176,8 @@ public sealed class DesignerAgent
         // executed and the result feeds back into the next turn.
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
 
-        var tools = BuildTools(spec);
+        var savedArtifacts = new List<string>();
+        var tools = BuildTools(spec, runId, savedArtifacts, hygiene, startedAt, ct);
 
         var agent = new ChatClientAgent(
             chatClient,
@@ -196,11 +232,10 @@ public sealed class DesignerAgent
                 }
             }
         }
-        // Re-fetch the spec to see what status the LLM committed.
-        var refreshed = await _specs.GetAsync(spec.Id, ct);
-        newStatus = refreshed?.Status is SpecStatus.Designed or SpecStatus.Approved or SpecStatus.NeedsRevision
-            ? refreshed.Status
-            : null;
+        // Current spec may already be Groomed. Use this run's committed output.
+        var decision = await _runs.ReadCommittedDecisionAsync(runId, ct);
+        newStatus = decision?.Status;
+        if (decision is not null) artifactIds = decision.ArtifactIds.ToList();
 
         if (newStatus is null)
         {
@@ -214,7 +249,7 @@ public sealed class DesignerAgent
                 "The spec is left in its current state; re-run the Designer.");
         }
 
-        return await FinishSuccessAsync(runId, spec.Id, newStatus.Value, artifactIds, hygiene, startedAt, ct);
+        return FinishCommittedSuccess(spec.Id, newStatus.Value, artifactIds, hygiene, startedAt);
     }
 
     /// <summary>
@@ -229,8 +264,17 @@ public sealed class DesignerAgent
         "NeedsRevision (structural problem — a legitimate exit; do NOT save artifacts). " +
         "The pipeline cannot proceed without that call.";
 
-    private IList<AITool> BuildTools(SpecRecord spec)
+    private IList<AITool> BuildTools(SpecRecord spec, long runId, List<string> savedArtifacts,
+        HygieneReport hygiene, DateTime startedAt, CancellationToken ct)
     {
+        async Task<string> SaveForRunAsync(string specId, string kind, string title,
+            string body, string bodyKind, string? references)
+        {
+            if (specId != spec.Id) return "{\"error\":\"Artifact must belong to this run's specification.\"}";
+            var result = await DbSaveDesignArtifact(specId, kind, title, body, bodyKind, references);
+            if (result.StartsWith("design-", StringComparison.Ordinal)) savedArtifacts.Add(result);
+            return result;
+        }
         var tools = new List<AITool>
         {
             AIFunctionFactory.Create(
@@ -244,7 +288,7 @@ public sealed class DesignerAgent
                 description: "Read the codebase graph (modules + import edges) for the project. Use this to confirm ## Touches references match real module ids."),
 
             AIFunctionFactory.Create(
-                ([Description("Optional spec id; if null returns the project's full artifact set.")] string? specId) => DbGetExistingDesignArtifacts(specId),
+                ([Description("This run's spec id; omit to read this run's artifacts.")] string? specId = null) => DbGetExistingDesignArtifacts(spec.Id, specId),
                 name: "db_get_existing_design_artifacts",
                 description: "List existing design artifacts (wireframes, mockups, component-specs, visual-rules). Use this to find a visual pattern to reuse instead of inventing a new one."),
 
@@ -260,14 +304,14 @@ public sealed class DesignerAgent
                     [Description("Short human title (1 line).")] string title,
                     [Description("The artifact body. For wireframe/mockup: HTML. For component-spec / visual-rule: markdown.")] string body,
                     [Description("One of: html, svg, markdown. Tells the dashboard how to render.")] string bodyKind,
-                    [Description("Optional JSON array of {designArtifactId, why}.")] string? references = null) => DbSaveDesignArtifact(specId, kind, title, body, bodyKind, references),
+                    [Description("Optional JSON array of {designArtifactId, why}.")] string? references = null) => SaveForRunAsync(specId, kind, title, body, bodyKind, references),
                 name: "db_save_design_artifact",
                 description: "Save a design artifact. The artifact is associated with the spec and appears on the Design tab."),
 
             AIFunctionFactory.Create(
                 (
                     [Description("Spec id.")] string specId,
-                    [Description("One of: Designed, Approved, NeedsRevision. Designed = visual spec done. Approved = non-visual, skip design. NeedsRevision = structural problem, do NOT design.")] string status) => DbSetSpecStatus(specId, status),
+                    [Description("One of: Designed, Approved, NeedsRevision. Designed = visual spec done. Approved = non-visual, skip design. NeedsRevision = structural problem, do NOT design.")] string status) => DbSetSpecStatus(spec.Id, specId, status, runId, savedArtifacts, hygiene, startedAt, ct),
                 name: "db_set_spec_status",
                 description: "Commit the design decision for the spec. You MUST call this exactly once at the end of every run. The pipeline can't proceed otherwise."),
         };
@@ -295,18 +339,18 @@ public sealed class DesignerAgent
         return "{\"note\":\"graph loaded from scheduler context; see .portHorizon/codebase-graph/\"}";
     }
 
-    private async Task<string> DbGetExistingDesignArtifacts(string? specId)
+    private async Task<string> DbGetExistingDesignArtifacts(string expectedSpecId, string? specId)
     {
         // v1: spec-scoped only. The LLM passes a spec_id and we
         // return its approved design_artifact rows. (Project-wide
         // lookup would need a projectId; the LLM doesn't have
         // one in v1. The visual-language memory + the
         // design-system rules are the cross-spec context.)
-        if (string.IsNullOrWhiteSpace(specId))
-        {
-            return "[]";
-        }
-        var list = await _artifacts.ListBySpecAsync(specId, DesignArtifactStatus.Approved);
+        specId ??= expectedSpecId;
+        if (specId != expectedSpecId) return "{\"error\":\"Design artifacts must belong to this run's specification.\"}";
+        var list = (await DesignerStoreRouting.ListArtifactsAsync(_artifactReadSpecs ?? _specs,
+            _historicalArtifacts ?? _artifacts, specId, false))
+            .Where(a => a.Status == DesignArtifactStatus.Approved).ToArray();
         return JsonSerializer.Serialize(list.Select(a => new
         {
             a.Id, a.SpecId, Kind = a.Kind.ToString(),
@@ -382,15 +426,18 @@ public sealed class DesignerAgent
         return created.Id;
     }
 
-    private async Task<string> DbSetSpecStatus(string specId, string status)
+    private async Task<string> DbSetSpecStatus(string expectedSpecId, string specId, string status,
+        long runId, IReadOnlyList<string> artifactIds, HygieneReport hygiene, DateTime startedAt, CancellationToken ct)
     {
+        if (specId != expectedSpecId) return "{\"error\":\"Decision must belong to this run's specification.\"}";
         if (!Enum.TryParse<SpecStatus>(status, out var newStatus))
             return $"{{\"error\":\"unknown status '{status}'\"}}";
         var current = await _specs.GetAsync(specId);
         if (current is null) return $"{{\"error\":\"spec {specId} not found\"}}";
         try
         {
-            await _specs.SetStatusAsync(specId, newStatus);
+            await _specs.CommitDesignDecisionAsync(specId, newStatus, runId, artifactIds,
+                hygiene.ToJson(), DateTime.UtcNow - startedAt, ct);
             _events.Publish(DesignerEventEmitter.Build(DateTime.UtcNow,
                 DesignerEventKind.StatusCommitted, specId, _runId, DesignerTriggerKind.Manual, newStatus.ToString()));
             return "ok";
@@ -401,13 +448,13 @@ public sealed class DesignerAgent
         }
     }
 
-    private async Task<DesignerResult> FinishSuccessAsync(
-        long runId, string specId, SpecStatus newStatus,
-        IReadOnlyList<string> artifactIds, HygieneReport hygiene, DateTime startedAt, CancellationToken ct)
+    private DesignerResult FinishCommittedSuccess(
+        string specId, SpecStatus newStatus,
+        IReadOnlyList<string> artifactIds, HygieneReport hygiene, DateTime startedAt)
     {
         var duration = DateTime.UtcNow - startedAt;
-        await _runs.FinishAsync(runId, DesignerRunStatus.Succeeded, newStatus, artifactIds,
-            hygiene.ToJson(), error: null, duration: duration, ct);
+        // The successful receipt and its handoff time were already committed
+        // atomically with the spec. Finishing the conversation cannot replace it.
         _events.Publish(DesignerEventEmitter.Build(DateTime.UtcNow,
             DesignerEventKind.RunCompleted, specId, _runId, DesignerTriggerKind.Manual, newStatus.ToString()));
         _logger.LogInformation("Designer: spec {SpecId} -> {Status} in {Ms}ms (artifacts={N})",

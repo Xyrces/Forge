@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 
 namespace Forge.Dashboard.Features.AppShell;
 
@@ -14,6 +15,10 @@ public sealed class HeartbeatDto
     public DateTime At { get; init; }
 }
 
+/// <summary>Additive /api/meta/buildinfo contract; revision identity is independent of projects.</summary>
+public sealed record BuildInfoDto(string InformationalVersion, string Framework,
+    string? SourceRevision = null, string? CommitUrl = null);
+
 public sealed class AppShellClient
 {
     private readonly HttpClient _http;
@@ -21,6 +26,27 @@ public sealed class AppShellClient
     public AppShellClient(HttpClient http)
     {
         _http = http;
+    }
+
+    public async Task<BuildInfoDto?> GetBuildInfoAsync(CancellationToken ct)
+    {
+        try
+        {
+            // Never scope running Forge identity to the selected target project.
+            return await _http.GetFromJsonAsync<BuildInfoDto>("/api/meta/buildinfo", ct);
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return null; // HttpClient timeout, not caller cancellation.
+        }
     }
 
     public async Task<ActiveSprintDto?> GetActiveSprintAsync(string? projectId, CancellationToken ct)

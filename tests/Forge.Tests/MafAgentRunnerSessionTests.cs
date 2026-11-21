@@ -258,11 +258,91 @@ public class MafAgentRunnerSessionTests : IDisposable
     {
         Assert.Equal("session/porthorizon/task-1/CoreDev",
             MafAgentRunner.SessionKey("porthorizon", "task-1", AgentType.CoreDev));
-        Assert.Equal("session/_/task-1/Reviewer",
-            MafAgentRunner.SessionKey(null, "task-1", AgentType.Reviewer));
-        Assert.Equal("session/_/task-1/Reviewer",
-            MafAgentRunner.SessionKey("  ", "task-1", AgentType.Reviewer));
+        Assert.Null(MafAgentRunner.SessionKey(null, "task-1", AgentType.Reviewer));
+        Assert.Null(MafAgentRunner.SessionKey("  ", "task-1", AgentType.Reviewer));
+        Assert.Equal("session/_/task-1/Reviewer/" + new string('a', 40),
+            MafAgentRunner.SessionKey(null, "task-1", AgentType.Reviewer, new string('a', 40)));
         Assert.Null(MafAgentRunner.SessionKey("porthorizon", null, AgentType.CoreDev));
+    }
+
+    [Fact]
+    public async Task ReviewerResumesOnlyExactHeadAndPreservesOlderHistory()
+    {
+        var context = ContextFor("review-task");
+        var h2 = new string('a', 40);
+        var h3 = new string('b', 40);
+        context["sourceSha"] = h2;
+        var first = await NewRunner(new EchoClient()).RunAsync(AgentType.Reviewer,
+            "H2_ONLY_OLD_EVIDENCE", null, context, CancellationToken.None);
+        var h2Stored = await _memory.GetAsync(first.SessionId!);
+        Assert.NotNull(h2Stored);
+        // A legacy task-wide blob is retained, but never imported into a newly pinned review.
+        var legacyKey = first.SessionId![..^(h2.Length + 1)];
+        await _memory.RememberAsync(legacyKey, h2Stored!.Body);
+        context["sourceSha"] = h3;
+        var fresh = new EchoClient();
+        var h3Result = await NewRunner(fresh).RunAsync(AgentType.Reviewer,
+            "H3_CURRENT_EVIDENCE", h2Stored.Body, context, CancellationToken.None);
+        Assert.False(fresh.SawText("H2_ONLY_OLD_EVIDENCE"));
+        Assert.NotEqual(first.SessionId, h3Result.SessionId);
+        var retry = new EchoClient();
+        await NewRunner(retry).RunAsync(AgentType.Reviewer, "H3_RETRY", null, context, CancellationToken.None);
+        Assert.True(retry.SawText("H3_CURRENT_EVIDENCE"));
+        Assert.False(retry.SawText("H2_ONLY_OLD_EVIDENCE"));
+        Assert.Equal(h2Stored, await _memory.GetAsync(first.SessionId));
+        Assert.Equal(h2Stored.Body, (await _memory.GetAsync(legacyKey))!.Body);
+        context.Remove("sourceSha");
+        var unpinned = new EchoClient();
+        var unpinnedResult = await NewRunner(unpinned).RunAsync(AgentType.Reviewer,
+            "UNPINNED", h2Stored.Body, context, CancellationToken.None);
+        Assert.False(unpinned.SawText("H2_ONLY_OLD_EVIDENCE"));
+        Assert.Null(unpinnedResult.SessionId);
+    }
+
+    [Theory]
+    [InlineData(AgentType.Reviewer)]
+    [InlineData(AgentType.CoreDev)]
+    public async Task GeneralInstructionsExcludeAuditRecordsButPreserveProjectAndSprintGuidance(AgentType role)
+    {
+        var excluded = new[] { "operator-acceptance-repair/spec/2/7", "breaker/task-1/638990000000000000", "session/another/task/Reviewer" };
+        foreach (var key in excluded) await _memory.RememberAsync(key, "INTERNAL_AUDIT_SENTINEL");
+        await _memory.ObserveReviewOriginsAsync("owner/repo/10/100", 159, new string('a', 40), DateTimeOffset.UtcNow, []);
+        var included = new[] { "vision/master", "playbook/review", "extraction/lesson", "operator-acceptance-repair-notes", "breaker-advice", "review/guidance", "sprint/current/lesson" };
+        foreach (var key in included) await _memory.RememberAsync(key, "GUIDANCE_" + key);
+        await _memory.RememberAsync("sprint/other/lesson", "OTHER_SPRINT_SENTINEL");
+        var client = new EchoClient();
+        var context = ContextFor("memory-filter");
+        context["sprintId"] = "current";
+        context["sourceSha"] = new string('a', 40);
+        await NewRunner(client).RunAsync(role, "TASK_PROMPT_SENTINEL", null, context, CancellationToken.None);
+        Assert.False(client.SawText("INTERNAL_AUDIT_SENTINEL"));
+        Assert.False(client.SawText("review/origins/v1/"));
+        Assert.False(client.SawText("OTHER_SPRINT_SENTINEL"));
+        foreach (var key in included) Assert.True(client.SawText("GUIDANCE_" + key));
+        Assert.True(client.SawText("TASK_PROMPT_SENTINEL"));
+        foreach (var key in excluded) Assert.Equal("INTERNAL_AUDIT_SENTINEL", (await _memory.GetAsync(key))!.Body);
+        Assert.NotNull(await _memory.GetAsync("review/origins/v1/owner/repo/10/100/159"));
+    }
+
+    [Theory]
+    [InlineData(AgentType.Reviewer)]
+    [InlineData(AgentType.CoreDev)]
+    public async Task ProjectInstructionsContainOnlyItsExactVision(AgentType role)
+    {
+        await _memory.RememberAsync("vision/master", "STALE_PRIMARY_VISION");
+        await _memory.RememberAsync("vision/forge", "ANOTHER_PROJECT_VISION");
+        await _memory.RememberAsync("vision/second-extra", "PREFIX_COLLISION_VISION");
+        await _memory.RememberAsync("vision/second/history", "OLD_HISTORY_VISION");
+        await _memory.RememberAsync("vision/second", "SECOND_CURRENT_VISION");
+        var client = new EchoClient();
+        var context = ContextFor("vision-isolation");
+        context["projectId"] = "second";
+        context["sourceSha"] = new string('b', 40);
+        await NewRunner(client).RunAsync(role, "Check the work.", null, context, CancellationToken.None);
+        Assert.True(client.SawText("SECOND_CURRENT_VISION"));
+        foreach (var forbidden in new[] { "STALE_PRIMARY_VISION", "ANOTHER_PROJECT_VISION",
+                     "PREFIX_COLLISION_VISION", "OLD_HISTORY_VISION" })
+            Assert.False(client.SawText(forbidden));
     }
 
     private sealed class SingleFactory : IChatClientFactory
@@ -278,16 +358,19 @@ public class MafAgentRunnerSessionTests : IDisposable
     private sealed class EchoClient : IChatClient
     {
         private readonly List<IReadOnlyList<ChatMessage>> _calls = new();
+        private readonly List<string> _instructions = new();
 
         public Task<ChatResponse> GetResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
             _calls.Add(messages.ToList());
+            if (options?.Instructions is { } instructions) _instructions.Add(instructions);
             return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "done")));
         }
 
         public bool SawText(string text) =>
-            _calls.SelectMany(c => c).Any(m => m.Text?.Contains(text, StringComparison.Ordinal) == true);
+            _calls.SelectMany(c => c).Any(m => m.Text?.Contains(text, StringComparison.Ordinal) == true)
+            || _instructions.Any(i => i.Contains(text, StringComparison.Ordinal));
 
         public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)

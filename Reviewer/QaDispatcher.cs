@@ -127,6 +127,19 @@ public sealed class QaDispatcher
     public async Task<QaOutcome?> VerifyOnceAsync(IssueRecord task, CancellationToken cancellationToken = default,
         Func<PullRequest, (string Sha, string Ref)>? headOverride = null)
     {
+        var gate = ReviewWorkerAttempt.Gate(_projectId, task.Id, AgentType.QA);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            task = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+            return await VerifyCoreAsync(task, cancellationToken, headOverride);
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<QaOutcome?> VerifyCoreAsync(IssueRecord task, CancellationToken cancellationToken,
+        Func<PullRequest, (string Sha, string Ref)>? headOverride)
+    {
         var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
         {
@@ -167,7 +180,22 @@ public sealed class QaDispatcher
         // the code tier — conservative: QA runs, and RunQaAsync's own
         // sync surfaces the failure through the normal attempt-budgeted
         // error path.
-        var (tier, diffPaths, preSyncedWorktree) = await ClassifyHeadAsync(task, branch, headSha, cancellationToken);
+        var prepared = await ReviewWorkerAttempt.BeginAsync(_agentRunner, _issues, task, AgentType.QA,
+            _projectId, headSha, cancellationToken);
+        task = prepared.Task;
+        var existing = prepared.Existing;
+        QaEvidenceTier tier;
+        IReadOnlyList<string> diffPaths;
+        string? preSyncedWorktree;
+        if (existing is not null)
+        {
+            if (!existing.Context.TryGetValue("qaEvidenceTier", out var savedTier)
+                || !Enum.TryParse<QaEvidenceTier>(savedTier, out tier) || !Enum.IsDefined(tier))
+                throw new InvalidOperationException("Existing QA worker has no valid applicability tier; refusing checkout reset.");
+            diffPaths = Array.Empty<string>();
+            preSyncedWorktree = existing.WorktreePath;
+        }
+        else (tier, diffPaths, preSyncedWorktree) = await ClassifyHeadAsync(task, branch, headSha, cancellationToken);
         if (tier == QaEvidenceTier.Docs)
         {
             var preview = string.Join(", ", diffPaths.Take(5));
@@ -199,7 +227,9 @@ public sealed class QaDispatcher
         var attempts = string.Equals(task.GetMetadata("qaAttemptSha"), headSha, StringComparison.Ordinal)
             ? int.TryParse(task.GetMetadata("qaAttempts"), out var a) ? a : 0
             : 0;
-        if (attempts >= MaxQaAttempts)
+        var invocationId = task.GetMetadata("qaWorkerId");
+        var alreadyCounted = invocationId is not null && task.GetMetadata("qaWorkerCounted") == invocationId;
+        if (!alreadyCounted && attempts >= MaxQaAttempts)
         {
             var parked = $"QA stage unavailable after {attempts} attempts at head {headSha[..Math.Min(7, headSha.Length)]} — operator review required";
             _logger.LogWarning("QA (task {Id}, PR #{Pr}): {Reason} (last error: {LastError})",
@@ -219,21 +249,28 @@ public sealed class QaDispatcher
 
         var round = (int.TryParse(task.GetMetadata("qaRound"), out var r) ? r : 0) + 1;
 
-        await _issues.TransitionAsync(task.Id, task.Status, $"QA round {round} started",
+        task = await _issues.TransitionAsync(task.Id, task.Status, $"QA round {round} started",
             new Dictionary<string, object>
             {
                 ["qaStartedAt"] = DateTime.UtcNow.ToString("O"),
                 ["qaAttemptSha"] = headSha,
-                ["qaAttempts"] = (attempts + 1).ToString(),
+                ["qaAttempts"] = (alreadyCounted ? attempts : attempts + 1).ToString(),
+                ["qaWorkerCounted"] = invocationId!,
                 ["qaTier"] = QaEvidenceTierClassifier.MetadataValue(tier),
             }, cancellationToken);
 
         try
         {
-            return await RunQaAsync(task, prNumber, branch, headSha, round, tier, preSyncedWorktree, cancellationToken);
+            return await RunQaAsync(task, prNumber, branch, headSha, round, tier, preSyncedWorktree, existing?.Context, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (_agentRunner is IReviewWorkerLifecycle &&
+                await ReviewWorkerAttempt.ConsumedAsync(_agentRunner, task, AgentType.QA, _projectId, cancellationToken) is null)
+            {
+                _logger.LogWarning(ex, "QA worker remains in flight; preserving invocation for adoption");
+                return null;
+            }
             return await ErrorOutcomeAsync(task, headSha, ex.Message, cancellationToken, prNumber, ex);
         }
     }
@@ -280,18 +317,20 @@ public sealed class QaDispatcher
     {
         _logger.LogWarning(ex, "QA (task {Id}, PR #{Pr}) error at {Sha}: {Reason}",
             task.Id, prNumber, headSha[..Math.Min(7, headSha.Length)], reason);
+        var consumed = await ReviewWorkerAttempt.ConsumedAsync(_agentRunner, task, AgentType.QA, _projectId, ct);
         await _issues.TransitionAsync(task.Id, task.Status, $"QA error: {reason}",
             new Dictionary<string, object>
             {
                 ["qaLastError"] = reason,
+                ["qaWorkerConsumed"] = consumed!,
                 ["qaLastErrorAt"] = DateTime.UtcNow.ToString("O"),
             }, ct);
         return new QaOutcome(VerdictError, "", headSha, reason);
     }
 
-    private async Task<QaOutcome> RunQaAsync(
+    private async Task<QaOutcome?> RunQaAsync(
         IssueRecord task, int prNumber, string branch, string headSha, int round,
-        QaEvidenceTier tier, string? preSyncedWorktree, CancellationToken ct)
+        QaEvidenceTier tier, string? preSyncedWorktree, IReadOnlyDictionary<string, string>? existingContext, CancellationToken ct)
     {
         // Dedicated QA worktree on its own agent-namespace branch, synced
         // to the PR head. The dev worktree is untouched — a rework round
@@ -324,6 +363,8 @@ public sealed class QaDispatcher
         };
         if (!string.IsNullOrWhiteSpace(_projectId)) context["projectId"] = _projectId;
 
+        context["qaEvidenceTier"] = tier.ToString();
+        ReviewWorkerAttempt.Bind(existingContext, task, AgentType.QA, headSha, context);
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(QaRunTimeout);
         AgentRunResult result;
@@ -335,6 +376,7 @@ public sealed class QaDispatcher
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
+            if (_agentRunner is IReviewWorkerLifecycle) return null; // detached; next sweep adopts, never resets the checkout
             return await ErrorOutcomeAsync(task, headSha,
                 $"QA run timed out after {QaRunTimeout.TotalMinutes:F0}m", ct, prNumber);
         }
@@ -439,11 +481,13 @@ public sealed class QaDispatcher
                 evidence.Select(f => f.Path).ToList(), oversized, ct);
         }
 
+        var consumed = await ReviewWorkerAttempt.ConsumedAsync(_agentRunner, task, AgentType.QA, _projectId, ct);
         await _issues.TransitionAsync(task.Id, task.Status, $"QA {verdict} (round {round})",
             new Dictionary<string, object>
             {
                 ["qaSha"] = headSha,
                 ["qaForSha"] = headSha,
+                ["qaWorkerConsumed"] = consumed!,
                 ["qaVerdict"] = verdict,
                 ["qaNotes"] = notes.Length > 1000 ? notes[..1000] : notes,
                 ["qaRound"] = round.ToString(),

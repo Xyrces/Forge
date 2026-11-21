@@ -131,6 +131,7 @@ public sealed class QaDispatcherTests : IDisposable
 
     private sealed class FakeGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public FakeGitHub() : base("o", "r", null) { }
         public List<string> Comments { get; } = new();
         public bool ThrowOnComment;
@@ -191,6 +192,127 @@ public sealed class QaDispatcherTests : IDisposable
         _issues, gh ?? new FakeGitHub(), _worktrees, runner,
         NullLogger<QaDispatcher>.Instance, projectId: "proj",
         visualPaths: visualPaths ?? new[] { "Client/" });
+
+    [Fact]
+    public async Task Distributed_HandledFailureBeforeWorkerCreationExhaustsInfraBudget()
+    {
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var jobs = new ReviewTestJobs(store);
+        var dispatcher = new QaDispatcher(_issues, new FakeGitHub(), _worktrees,
+            new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset"),
+            NullLogger<QaDispatcher>.Instance, projectId: "proj");
+        var task = await SeedTask();
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            var outcome = await dispatcher.VerifyOnceAsync(task, headOverride: _ => ("mismatched-head", "agent/task-1"));
+            Assert.Equal(QaDispatcher.VerdictError, outcome!.Verdict);
+            var after = (await _issues.GetAsync(task.Id))!;
+            Assert.Equal(attempt.ToString(), after.GetMetadata("qaAttempts"));
+            Assert.Equal(after.GetMetadata("qaWorkerId"), after.GetMetadata("qaWorkerConsumed"));
+        }
+        await dispatcher.VerifyOnceAsync(task, headOverride: _ => ("mismatched-head", "agent/task-1"));
+        Assert.Equal(IssueStatus.Blocked, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Empty(jobs.Created);
+    }
+
+    [Fact]
+    public async Task Distributed_CrashAfterCountBeforeAssignment_RetainsIdentityAndCount()
+    {
+        var task = await SeedTask();
+        var head = PrHeadSha(_workDir);
+        await _issues.TransitionAsync(task.Id, task.Status, "durable start before crash", new Dictionary<string, object>
+        {
+            ["qaWorkerId"] = "durable-before-crash", ["qaWorkerHead"] = head,
+            ["qaWorkerCounted"] = "durable-before-crash", ["qaAttempts"] = "1", ["qaAttemptSha"] = head,
+        });
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var jobs = new ReviewTestJobs(store);
+        jobs.OnCreate = a => jobs.Finish(a, "no verdict");
+        var dispatcher = new QaDispatcher(_issues, new FakeGitHub(), _worktrees,
+            new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset"),
+            NullLogger<QaDispatcher>.Instance, projectId: "proj");
+        await dispatcher.VerifyOnceAsync(task, headOverride: _ => (head, "agent/task-1"));
+        Assert.Equal("durable-before-crash", Assert.Single(jobs.Created).DispatchId);
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("qaAttempts"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Distributed_TerminalFailureOrInvalidOutput_RetriesFreshLogicalAttempt(bool failure)
+    {
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var jobs = new ReviewTestJobs(store);
+        jobs.OnCreate = a => jobs.Created.Count == 1
+            ? jobs.Finish(a, "no verdict", failure ? "infra failure" : null)
+            : jobs.Finish(a, "QA_VERDICT: fail\nConcrete failure");
+        var runner = new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset");
+        var dispatcher = new QaDispatcher(_issues, new FakeGitHub(), _worktrees, runner,
+            NullLogger<QaDispatcher>.Instance, projectId: "proj");
+        var task = await SeedTask();
+        var head = PrHeadSha(_workDir);
+        Assert.Equal(QaDispatcher.VerdictError,
+            (await dispatcher.VerifyOnceAsync(task, headOverride: _ => (head, "agent/task-1")))!.Verdict);
+        Assert.Equal(QaDispatcher.VerdictFail,
+            (await dispatcher.VerifyOnceAsync(task, headOverride: _ => (head, "agent/task-1")))!.Verdict);
+        Assert.Equal(2, jobs.Created.Count);
+        Assert.NotEqual(jobs.Created[0].DispatchId, jobs.Created[1].DispatchId);
+        Assert.Null(await dispatcher.VerifyOnceAsync(task, headOverride: _ => (head, "agent/task-1")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Distributed_DetachAdoptsWithoutCountingOrResettingWorktree(bool terminal)
+    {
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var jobs = new ReviewTestJobs(store);
+        jobs.OnCreate = async a =>
+        {
+            File.WriteAllText(Path.Combine(a.WorktreePath, "feature.txt"), "retained worker changes");
+            if (terminal) await jobs.Finish(a, "no verdict");
+            throw new OperationCanceledException("wait detached");
+        };
+        QaDispatcher NewDispatcher() => new(_issues, new FakeGitHub(), _worktrees,
+            new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset"),
+            NullLogger<QaDispatcher>.Instance, projectId: "proj");
+        var task = await SeedTask();
+        var head = PrHeadSha(_workDir);
+        Assert.Null(await NewDispatcher().VerifyOnceAsync(task, headOverride: _ => (head, "agent/task-1")));
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("qaAttempts"));
+        jobs.OnObserve = _ => jobs.Finish(jobs.Created[0], "no verdict");
+        Assert.Equal(QaDispatcher.VerdictError,
+            (await NewDispatcher().VerifyOnceAsync(task, headOverride: _ => (head, "agent/task-1")))!.Verdict);
+        Assert.Single(jobs.Created);
+        Assert.Equal("retained worker changes", File.ReadAllText(Path.Combine(jobs.Created[0].WorktreePath, "feature.txt")));
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("qaAttempts"));
+    }
+
+    [Fact]
+    public async Task Distributed_ChangedHeadJoinsOldWorkerBeforeReset_JoinFailurePreservesWork()
+    {
+        var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
+        var jobs = new ReviewTestJobs(store);
+        jobs.OnCreate = a =>
+        {
+            File.WriteAllText(Path.Combine(a.WorktreePath, "feature.txt"), "worker still owns this");
+            throw new OperationCanceledException("wait detached");
+        };
+        var dispatcher = new QaDispatcher(_issues, new FakeGitHub(), _worktrees,
+            new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset"),
+            NullLogger<QaDispatcher>.Instance, projectId: "proj");
+        var task = await SeedTask();
+        Assert.Null(await dispatcher.VerifyOnceAsync(task, headOverride: _ => (PrHeadSha(_workDir), "agent/task-1")));
+        jobs.OnJoin = _ => throw new InvalidOperationException("cannot prove pod gone");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => dispatcher.VerifyOnceAsync(task,
+            headOverride: _ => (DocsHeadSha(_workDir), "agent/task-docs")));
+        Assert.Equal("worker still owns this", File.ReadAllText(Path.Combine(jobs.Created[0].WorktreePath, "feature.txt")));
+        jobs.OnJoin = _ => Assert.Equal("worker still owns this", File.ReadAllText(Path.Combine(jobs.Created[0].WorktreePath, "feature.txt")));
+        Assert.Equal(QaDispatcher.VerdictNotApplicable,
+            (await dispatcher.VerifyOnceAsync(task, headOverride: _ => (DocsHeadSha(_workDir), "agent/task-docs")))!.Verdict);
+        Assert.Single(jobs.Created);
+        Assert.False(File.Exists(Path.Combine(jobs.Created[0].WorktreePath, "feature.txt")));
+    }
 
     [Fact]
     public void ParseQaOutput_PassAndFail()

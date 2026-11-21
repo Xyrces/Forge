@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Octokit;
 using Forge.AgentTools;
@@ -46,7 +46,8 @@ public sealed class StartupRecovery
         IDashboardEventBus events,
         ILogger<StartupRecovery> logger,
         StartupRecoveryOptions? options = null,
-        Core.TaskStateMachine? lifecycle = null)
+        Core.TaskStateMachine? lifecycle = null,
+        Func<string, string, CancellationToken, Task<bool>>? hasDurableWorker = null)
     {
         _issues = issues;
         _reports = reports;
@@ -56,9 +57,11 @@ public sealed class StartupRecovery
         _logger = logger;
         _options = options ?? new StartupRecoveryOptions();
         _lifecycle = lifecycle;
+        _hasDurableWorker = hasDurableWorker;
     }
 
     private readonly Core.TaskStateMachine? _lifecycle;
+    private readonly Func<string, string, CancellationToken, Task<bool>>? _hasDurableWorker;
 
     /// <summary>Everything the recovery pass needs that is
     /// project-scoped. The construction-time fields form the PRIMARY
@@ -148,20 +151,16 @@ public sealed class StartupRecovery
         {
             foreach (var ctx in contexts)
             {
-                // Zombie run rows cannot be alive — this process just
-                // started. Closing them is load-bearing beyond board
-                // truth: the orphan-claim reaper treats an active
-                // agent_run row as proof the task's claim is alive,
-                // so a zombie shields its orphaned claim forever
-                // (observed live 2026-08-01: reviewer rows 9h old).
+                // Local runs die with the controller; durable worker Jobs do not.
                 if (ctx.Issues is Core.IssueStore concrete)
                 {
                     var zombies = await new Core.AgentRunStore(concrete.Db)
-                        .FailZombieRunsAsync(null, "service restart — no run survives a process restart", ct);
+                        .FailZombieRunsAsync(null, "service restart: local run no longer owned", ct,
+                            _hasDurableWorker is null ? null : (run, token) => run.TaskId is null
+                                ? Task.FromResult(false)
+                                : _hasDurableWorker(run.ProjectId ?? concrete.ProjectId, run.TaskId, token));
                     foreach (var z in zombies)
-                    {
                         _logger.LogInformation("StartupRecovery: closed zombie agent run {RunId} (project={Project})", z, ctx.ProjectId);
-                    }
                 }
 
                 // The store returns every held InProgress row
@@ -221,7 +220,10 @@ public sealed class StartupRecovery
         issueCts.CancelAfter(TimeSpan.FromSeconds(60));
         try
         {
-            // Classify first — pure function over metadata + worktree.
+            // Publication may commit before the prior process records completion.
+            // Reconcile it before classifying a published run as dead.
+            issue = await PublishedRunLifecycle.ReconcileAsync(
+                ctx.Issues, _lifecycle, issue, issueCts.Token);
             var decision = Classify(issue);
             switch (decision.Action)
             {
@@ -336,38 +338,24 @@ public sealed class StartupRecovery
                     // re-claims it — but the loop only claims Pending
                     // issues, so those orphans sat forever.)
                     await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Pending,
-                        $"recovery: orphaned at {issue.DispatchCheckpoint?.ToDbValue()} by restart; re-queued", ct: ct);
+                        $"recovery: orphaned at {issue.DispatchCheckpoint?.ToDbValue()} by restart; re-queued", metadata: ResumeDispatchMetadata(issue), ct: ct);
                     _events.Publish(RecoveryEvent(issue.Id, "requeued",
                         $"{issue.DispatchCheckpoint?.ToDbValue()}; transitioned to Pending for re-dispatch"));
                     return new RecoveryActionRecord(issue.Id, before, before, "requeued",
                         "worktree_acquired; transitioned to Pending for re-dispatch");
 
                 case DispatchCheckpoint.AgentCompleted:
-                    // Commit + push + PR.
-                    await CommitAndPushAsync(issue, worktreePath!, branch, ctx, ct);
-                    await TryOpenPrAsync(issue, branch, ctx, ct);
-                    await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
-                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
-                    _events.Publish(RecoveryEvent(issue.Id, "replay", "agent_completed -> pr_opened"));
-                    return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
-
                 case DispatchCheckpoint.CommitDone:
-                    _logger.LogInformation("Recovery({Id}): CommitDone step - pushing", issue.Id);
-                    await ctx.Worktrees.PushAsync(worktreePath!, branch, ct);
-                    _logger.LogInformation("Recovery({Id}): push OK - opening PR", issue.Id);
-                    await TryOpenPrAsync(issue, branch, ctx, ct);
-                    _logger.LogInformation("Recovery({Id}): PR OK", issue.Id);
-                    await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
-                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
-                    _events.Publish(RecoveryEvent(issue.Id, "replay", "commit_done -> pr_opened"));
-                    return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
-
                 case DispatchCheckpoint.PushDone:
-                    await TryOpenPrAsync(issue, branch, ctx, ct);
-                    await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
-                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
-                    _events.Publish(RecoveryEvent(issue.Id, "replay", "push_done -> pr_opened"));
-                    return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
+                    // Checkpoints record progress, not a current verification receipt.
+                    // Resume through the normal pipeline so verification, no-diff handling
+                    // and existing-PR reconciliation cannot be bypassed by a restart.
+                    await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                        $"recovery: {before}; re-queued for verified dispatch", metadata: ResumeDispatchMetadata(issue), ct: ct);
+                    await CoerceTerminalStateAsync(issue, ctx, ct);
+                    _events.Publish(RecoveryEvent(issue.Id, "requeued",
+                        $"{before}; verification required before publication"));
+                    return new RecoveryActionRecord(issue.Id, before, before, "requeued", null);
 
                 case DispatchCheckpoint.PrOpened:
                     // Engineering-owed rework round whose run died
@@ -396,6 +384,11 @@ public sealed class StartupRecovery
         }
     }
 
+    private static Dictionary<string, object>? ResumeDispatchMetadata(IssueRecord issue) =>
+        issue.GetMetadata("dispatchId") is { Length: > 0 } dispatchId
+            ? new() { ["resumeDispatchId"] = dispatchId }
+            : null;
+
     /// <summary>
     /// Pure classification function: given an issue's checkpoint
     /// + metadata + worktree directory existence, return what
@@ -410,6 +403,18 @@ public sealed class StartupRecovery
         var branch = issue.GetMetadata("branch") ?? $"agent/{issue.Id}";
         var prNumber = issue.GetMetadata("prNumber");
 
+        var state = issue.GetMetadata("state");
+        // Claim resets the checkpoint for every engineering round. A current
+        // published checkpoint plus an existing PR therefore belongs to the
+        // watcher even if the completion event was lost at process shutdown.
+        // This also keeps dry-run classification consistent with live recovery.
+        if (int.TryParse(prNumber, out var publishedPr) && publishedPr > 0
+            && issue.DispatchCheckpoint is >= DispatchCheckpoint.PushDone
+            && (state is null or nameof(TaskLifecycleState.AgentRunning)
+                or nameof(TaskLifecycleState.ReworkRunning) or nameof(TaskLifecycleState.Dispatching)
+                || Core.OrphanedClaimReaper.IsWatchOwnedPhase(state)))
+            return new RecoveryDecision(RecoveryAction.LeftAlone, "published run; watcher owns the existing PR");
+
         // Already has a PR AND is in a watch-owned (PR-phase) state —
         // leave alone; the watch path is independent of the workflow.
         // A prNumber task in an ENGINEERING-owed state (ReworkQueued
@@ -418,7 +423,6 @@ public sealed class StartupRecovery
         // 2026-07-31: task-360/361/362/364 orphaned InProgress +
         // ReworkQueued, "left alone" at every boot while nothing
         // re-dispatched them).
-        var state = issue.GetMetadata("state");
         if (!string.IsNullOrEmpty(prNumber) && int.TryParse(prNumber, out _)
             && Core.OrphanedClaimReaper.IsWatchOwnedPhase(state))
         {
@@ -492,52 +496,9 @@ public sealed class StartupRecovery
         }
     }
 
-    private async Task CommitAndPushAsync(
-        IssueRecord issue, string worktreePath, string branch, ProjectRecoveryContext ctx, CancellationToken ct)
-    {
-        var commit = await ctx.Worktrees.CommitAllAsync(
-            worktreePath, $"Task({issue.Id}): {issue.Title}", ct);
-        if (!commit.HasChanges)
-        {
-            _logger.LogInformation("Recovery({Id}): no changes to commit on {Branch}", issue.Id, branch);
-        }
-        else
-        {
-            _logger.LogInformation("Recovery({Id}): committed on {Branch}", issue.Id, branch);
-        }
-        await ctx.Worktrees.PushAsync(worktreePath, branch, ct);
-        var headSha = await ctx.Worktrees.GetHeadShaAsync(worktreePath, ct);
-        await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.CommitDone, ct);
-        await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PushDone, ct);
-        // Record branchSha so the dispatch loop's PR step can pick it up.
-        await ctx.Issues.TransitionAsync(issue.Id, issue.Status, error: null,
-            metadata: new Dictionary<string, object> { ["branchSha"] = headSha }, ct: ct);
-    }
-
-    private async Task TryOpenPrAsync(IssueRecord issue, string branch, ProjectRecoveryContext ctx, CancellationToken ct)
-    {
-        var pr = await ctx.GitHub.CreatePullRequestAsync(
-            title: PrText.Title(issue),
-            body: PrText.Body(issue, headSha: null, modelText: null,
-                note: "recovered by StartupRecovery after a crash"),
-            headBranch: branch,
-            baseBranch: ctx.DefaultBranch ?? "main",
-            cancellationToken: ct);
-        await ctx.Issues.TransitionAsync(issue.Id, issue.Status, error: null,
-            metadata: new Dictionary<string, object>
-            {
-                ["prNumber"] = pr.Number,
-                ["prOpenedAt"] = DateTime.UtcNow.ToString("O"),
-            }, ct: ct);
-        _logger.LogInformation("Recovery({Id}): opened PR #{Pr}", issue.Id, pr.Number);
-
-        // No watch row: the state-driven sweep discovers watched
-        // tasks by their prNumber metadata (written above).
-    }
-
     private async Task TryRemoveWorktreeAsync(IssueRecord issue, ProjectRecoveryContext ctx, CancellationToken ct)
     {
-        try { await ctx.Worktrees.RemoveAsync(issue.Id, ct); }
+        try { await ctx.Worktrees.RemoveAsync(IssueWorktreeIdentity.For(issue), ct); }
         catch (Exception ex) { _logger.LogWarning(ex, "Recovery({Id}): worktree removal failed", issue.Id); }
     }
 

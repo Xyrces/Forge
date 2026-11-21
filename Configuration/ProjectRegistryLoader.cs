@@ -46,20 +46,5 @@ public static class ProjectRegistryLoader
         await Task.CompletedTask;
     }
 
-    private static ProjectOptions ToOptions(ProjectRecord r) => new()
-    {
-        Id = r.Id,
-        Name = r.Name,
-        RepoUrl = r.RepoUrl,
-        DefaultBranch = r.DefaultBranch,
-        // Root is derived at bootstrap time from dataRoot + RepoUrl.
-        // ProjectStore doesn't store Root because the SQLite row
-        // would drift on operator moves.
-        Root = string.Empty,
-        // Role caps persist in SQLite (v19 roles_json); the
-        // orchestrator seeds SlotTable from these at startup.
-        Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
-        Territories = new Dictionary<string, Core.RoleTerritory>(r.Territories, StringComparer.OrdinalIgnoreCase),
-        VerifyCommands = r.VerifyCommands?.ToList(),
-    };
+    private static ProjectOptions ToOptions(ProjectRecord r) => r.ToProjectOptions(string.Empty);
 }

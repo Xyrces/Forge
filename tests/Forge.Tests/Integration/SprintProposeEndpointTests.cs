@@ -72,12 +72,20 @@ public class SprintProposeEndpointTests : IDisposable
         Assert.True(body.AuditId > 0);
     }
 
-    [Fact]
-    public async Task Propose_WithTasks_ReturnsRankedCandidates()
+    private async Task BindPending()
     {
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Memory bank hot path", Priority: 1), default);
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Refactor dashboard", Priority: 3), default);
+        var scope = await ApprovedSprintFixture.Scope(_issues);
+        var tasks = (await _issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending })).Where(i => i.Type == "task").ToArray();
+        await ApprovedSprintFixture.Bind(_issues,scope,tasks);
+    }
 
+    [Fact]
+    public async Task Propose_WithTasks_ReturnsOneCompleteOutcome()
+    {
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "Memory bank hot path", Priority: 1), default);
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "Refactor dashboard", Priority: 3), default);
+
+        await BindPending();
         var resp = await _client.GetAsync("/api/sprints/propose-next?count=5");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<ProposeShape>();
@@ -86,25 +94,28 @@ public class SprintProposeEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task Propose_ThemeMatch_BumpsScore()
+    public async Task Propose_ArbitraryThemeCannotChangeApprovedOutcome()
     {
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Memory bank refinements", Priority: 2), default);
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "Memory bank refinements", Priority: 2), default);
 
+        await BindPending();
         var respWith = await _client.GetAsync("/api/sprints/propose-next?theme=memory&count=5");
         var bodyWith = await respWith.Content.ReadFromJsonAsync<ProposeShape>();
 
         var respWithout = await _client.GetAsync("/api/sprints/propose-next?count=5");
         var bodyWithout = await respWithout.Content.ReadFromJsonAsync<ProposeShape>();
 
-        Assert.True(bodyWith!.Candidates[0].Score > bodyWithout!.Candidates[0].Score);
+        Assert.Equal(bodyWith!.SelectedTaskIds, bodyWithout!.SelectedTaskIds);
+        Assert.Equal(bodyWith.Theme,bodyWithout.Theme);
     }
 
     [Fact]
     public async Task Commit_CreatesSprintAndLinksTasks()
     {
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "P6 UI", Priority: 2), default);
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "P6 backend", Priority: 2), default);
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "P6 UI", Priority: 2), default);
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "P6 backend", Priority: 2), default);
 
+        await BindPending();
         var proposeResp = await _client.GetAsync("/api/sprints/propose-next?count=2");
         var propose = await proposeResp.Content.ReadFromJsonAsync<ProposeShape>();
 
@@ -112,8 +123,8 @@ public class SprintProposeEndpointTests : IDisposable
         {
             auditId = propose!.AuditId,
             taskIds = propose.SelectedTaskIds,
-            theme = "P6",
-            goal = "Ship the new UI",
+            theme = propose.Theme,
+            goal = propose.Theme,
             committedBy = "test",
         };
         var resp = await _client.PostAsJsonAsync("/api/sprints/propose-next/commit", commit);

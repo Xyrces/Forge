@@ -89,9 +89,15 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             DateTime.UtcNow, DashboardEventKind.AgentSessionStarted,
             issue.Id, $"role={roleAgent.AgentName} worktree={worktreePath}"));
 
-        var designRefs = await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct);
-        var artRefs = await LoadArtOutputRefsAsync(issues, artOutputs, issue, ct);
+        var (designRefs, artRefs) = await LoadArtifactReferencesAsync(
+            issues, issue, designArtifacts, artOutputs, ct);
         var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch, designRefs, artRefs);
+        if (!string.IsNullOrWhiteSpace(issue.GetMetadata("existingVerificationRequest")))
+            prompt += "\n\nThe former PR was closed unmerged because it contained no changes. That is not acceptance evidence. " +
+                "This fresh configured-base checkout must be checked against the same approved task criteria. " +
+                "Do not manufacture edits to create a diff. If the approved implementation already exists, run the required checks, " +
+                "explain the concrete evidence, and request NO_CHANGES_NEEDED. Independent verification and review still decide acceptance; " +
+                "deployment and operator observations remain separate obligations.";
         // Rework loop: a task requeued by the PRWatcher carries the
         // failure context (CI failure or reviewer notes) — surface it
         // prominently so the agent fixes THAT, not re-explores.
@@ -134,6 +140,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         // would waste tokens. The gate still records the plan.
         var planFastPath = (issue.GetMetadata("reworkReason") ?? "") is { } reason
             && (reason.Contains("conflicts with the base branch", StringComparison.OrdinalIgnoreCase)
+                || reason == Forge.Reviewer.PRWatcher.BaseRefreshReason
                 || reason.Contains("base-branch CI recovered", StringComparison.OrdinalIgnoreCase));
         var queued = drainMessageBus(roleAgent.AgentName);
         var fullPrompt = string.IsNullOrEmpty(queued)
@@ -143,7 +150,9 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         AgentRunResult result;
         CancellationToken effectiveCt = ct;
         CancellationTokenSource? timeoutCts = null;
-        if (timeoutMinutes > 0)
+        // Distributed workers enforce the model deadline in-pod; waiting also includes
+        // independent verification, which must not inherit an expired model timer.
+        if (timeoutMinutes > 0 && runner is not Workers.KubernetesAgentRunner)
         {
             timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
@@ -162,6 +171,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 ["projectId"] = projectId ?? string.Empty,
                 ["planFastPath"] = planFastPath ? "true" : "false",
             };
+            if (runner is Workers.KubernetesAgentRunner)
+                context["modelTimeoutMinutes"] = timeoutMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
             // Dispatch correlation id (v30): stamped on the issue by
             // OrchestratorAgent at claim; the runner writes it onto
             // the agent_run row so journal + run + task all join on
@@ -170,6 +181,10 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             {
                 context["dispatchId"] = dispatchId;
             }
+            if (issue.GetMetadata("dispatchEligibleAt") is { Length: > 0 } eligibleAt)
+                context["dispatchEligibleAt"] = eligibleAt;
+            if (issue.GetMetadata("dispatchWakeup") is { Length: > 0 } queueWakeup)
+                context["dispatchWakeup"] = queueWakeup;
             // Triage model escalation (phase 3): the dispatch path
             // consumed the task's llm/taskModel marker and stamped
             // modelEscalatedTo — this run rides THAT provider+model
@@ -272,10 +287,20 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 meta["lastError"] = timeoutMsg;
                 meta["modelResponse"] = $"<timed out after {timeoutMinutes}m>";
                 meta["agentTimeout"] = "true";
-                await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                meta["lastErrorAt"] = DateTime.UtcNow.ToString("O");
+                // Preserve the running state until the orchestrator records RunDied and applies retry policy.
+                await issues.TransitionAsync(issue.Id, cur.Status,
                     error: timeoutMsg, metadata: meta, ct: ct);
             }
             throw new TimeoutException(timeoutMsg);
+        }
+        catch (Workers.WorkerExecutionUncertainException ex)
+        {
+            var blocked = await issues.GetAsync(issue.Id, ct) ?? issue;
+            if (lifecycle is not null)
+                await lifecycle.ReportAsync(issues, blocked, Core.TaskEvent.OperatorBlocked, watch: null, hasActiveDevRun: false, ct);
+            await issues.TransitionAsync(issue.Id, IssueStatus.Blocked, ex.Message, ct: ct);
+            throw;
         }
         catch (Exception ex)
         {
@@ -324,7 +349,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 ["sessionId"] = result.SessionId ?? "",
                 ["elapsedMs"] = result.Elapsed.TotalMilliseconds,
             }));
-        return new AgentCompleted(input, AgentResult.Ok, result.Text ?? string.Empty, result.SessionId);
+        return new AgentCompleted(input, AgentResult.Ok, result.Text ?? string.Empty, result.SessionId,
+            result.Verification, runner is Workers.KubernetesAgentRunner);
     }
 
     private static async Task RecordModelResponseAsync(
@@ -383,7 +409,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
 
                 Design artifacts (P2.a): the parent spec has {designArtifacts.Count} design artifact(s):
                 {refs}
-                Each one is at GET /api/specs/{issue.ParentIssueId ?? issue.Id}/design-artifacts. Use `curl` to fetch them BEFORE writing code. The artifact body IS the visual source of truth.
+                Call read_artifact with each design ID before implementing its visual requirements.
                 """;
         }
 
@@ -391,12 +417,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         if (artOutputs is { Count: > 0 })
         {
             var refs = string.Join(", ", artOutputs.Select(a => $"{a.Id} [{a.Kind}:{a.BodyKind}]"));
-            var artFileApi = $"/api/specs/{issue.ParentIssueId ?? issue.Id}/art-output";
             artSection = $$"""
 
                 Art outputs (P2.b): the parent spec has {{artOutputs.Count}} art output(s):
                 {{refs}}
-                Each one is at GET {{artFileApi}}. The body is a relative path under .portHorizon/art-output/. The file is served at GET /api/art-output/{id}/file (use `curl` to download). Use these for the actual asset payloads in your implementation.
+                Call read_artifact with the art ID. Its body gives the filesystem path to open from your task worktree.
                 """;
         }
 
@@ -418,71 +443,42 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             only if — you conclude the task genuinely requires no code
             changes (already implemented, verification-only), end your
             final message with the exact marker NO_CHANGES_NEEDED plus
-            a one-sentence justification. A run that produces no diff
+            concrete implementation and test evidence. This marker requests independent
+            verification; it is not completion or acceptance evidence. Only an approved
+            ImplementationVerified criterion can use the existing-code path. Strict
+            MergedAndVerified criteria still require their merged-PR evidence. A run that produces no diff
             without that marker is treated as a failed attempt and
             re-queued (circuit breaker applies).
             """;
     }
 
-    /// <summary>
-    /// Looks up the spec associated with the issue (via parent_issue_id)
-    /// and returns its design_artifact rows as refs. P2.a: the
-    /// engineering agent prompt references these so the model can
-    /// fetch the visual artifacts before writing code.
-    /// </summary>
-    private static async Task<IReadOnlyList<DesignArtifactRef>?> LoadDesignArtifactRefsAsync(
-        IIssueStore issues, DesignArtifactStore designArtifacts,
-        IssueRecord issue, CancellationToken ct)
+    internal static async Task<(IReadOnlyList<DesignArtifactRef>, IReadOnlyList<ArtOutputRef>)> LoadArtifactReferencesAsync(
+        IIssueStore issues, IssueRecord task, DesignArtifactStore designs, ArtOutputStore art,
+        CancellationToken ct)
     {
-        // Issue's parent_issue_id is the epic; the spec that was created
-        // from that epic has parent_issue_id = epic. For stories/tasks,
-        // the spec parent_issue_id may be the story's parent epic.
-        // Try the issue itself first, then walk up the parent chain.
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        string? current = issue.Id;
-        while (!string.IsNullOrEmpty(current) && seen.Add(current))
+        if (issues is not IssueStore owner) return ([], []);
+        // Groomed tasks parent to a story and stories parent to a spec, which lives
+        // outside the issue table. Never resolve project-local issue IDs in another store.
+        var parentId = task.ParentIssueId;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        while (parentId is not null)
         {
-            var all = await issues.ListAsync(new IssueFilter(), ct);
-            var spec = all.FirstOrDefault(s => s.ParentIssueId == current);
-            if (spec is null) break;
-            var arts = await designArtifacts.ListBySpecAsync(spec.Id, status: null, ct);
-            if (arts.Count > 0)
-            {
-                return arts.Select(a => new DesignArtifactRef(a.Id, a.Kind.ToString().ToLowerInvariant(), a.Title)).ToList();
-            }
-            current = spec.ParentIssueId;
+            if (!seen.Add(parentId)) return ([], []);
+            var parent = await issues.GetAsync(parentId, ct);
+            if (parent is null) break;
+            parentId = parent.ParentIssueId;
         }
-        return null;
-    }
+        if (parentId is null || await new SpecStore(owner).GetAsync(parentId, ct) is null) return ([], []);
 
-    /// <summary>
-    /// P2.b: walks the same parent chain as
-    /// <see cref="LoadDesignArtifactRefsAsync"/> and returns
-    /// the spec's <c>art_output</c> rows. Mirrors the design
-    /// ref loader; the prompt builder renders an
-    /// "Art outputs" section the engineering agent can
-    /// <c>curl</c> before writing code.
-    /// </summary>
-    private static async Task<IReadOnlyList<ArtOutputRef>?> LoadArtOutputRefsAsync(
-        IIssueStore issues, ArtOutputStore artOutputs,
-        IssueRecord issue, CancellationToken ct)
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        string? current = issue.Id;
-        while (!string.IsNullOrEmpty(current) && seen.Add(current))
-        {
-            var all = await issues.ListAsync(new IssueFilter(), ct);
-            var spec = all.FirstOrDefault(s => s.ParentIssueId == current);
-            if (spec is null) break;
-            var arts = await artOutputs.ListBySpecAsync(spec.Id, status: null, ct);
-            if (arts.Count > 0)
-            {
-                return arts.Select(a => new ArtOutputRef(
-                    a.Id, a.Kind.ToString().ToLowerInvariant(), a.BodyKind, a.Title)).ToList();
-            }
-            current = spec.ParentIssueId;
-        }
-        return null;
+        var local = new List<ArtifactReference>(await designs.ListReferencesAsync(parentId, ct));
+        local.AddRange(await art.ListReferencesAsync(parentId, ct));
+        var historical = await new OwnedArtifactHistoryStore(owner.Db).ListReferencesAsync(parentId, ct);
+        var refs = ArtifactHistory.IncludeUnambiguousHistory(local, historical, r => r.Id)
+            .OrderBy(r => r.Id, StringComparer.Ordinal).ToList();
+        return (refs.Where(r => r.Id.StartsWith("design-", StringComparison.Ordinal))
+                .Select(r => new DesignArtifactRef(r.Id, r.Kind, r.Title)).ToArray(),
+            refs.Where(r => r.Id.StartsWith("art-", StringComparison.Ordinal))
+                .Select(r => new ArtOutputRef(r.Id, r.Kind, r.BodyKind, r.Title)).ToArray());
     }
 }
 
@@ -506,4 +502,6 @@ public sealed record AgentCompleted(
     WorktreeReady Worktree,
     AgentResult Result,
     string Text,
-    string? SessionId);
+    string? SessionId,
+    VerificationReceipt? Verification = null,
+    bool RequiresWorkerVerification = false);

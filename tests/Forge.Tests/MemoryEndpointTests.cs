@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -20,6 +20,37 @@ namespace Forge.Tests;
 /// </summary>
 public class MemoryEndpointTests : IDisposable
 {
+    [Fact]
+    public async Task GenericMemoryCannotReplaceOrDeleteReviewProvenance()
+    {
+        await _memory.ObserveReviewOriginsAsync("repo", 1, "head", DateTimeOffset.UtcNow, []);
+        const string key = "review/origins/v1/repo/1";
+        var before = await _memory.GetAsync(key);
+        var result = await _client.PostAsJsonAsync("/api/memory", new { key, body = "forged" });
+        Assert.Equal(HttpStatusCode.Forbidden, result.StatusCode);
+        var removed = await _client.DeleteAsync("/api/memory/" + Uri.EscapeDataString(key));
+        Assert.True(removed.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound);
+        Assert.Equal(before, await _memory.GetAsync(key));
+    }
+
+    [Theory]
+    [InlineData("review/project-mode")]
+    [InlineData("review/task-hold/task-1")]
+    [InlineData("review/project-mode-audit/receipt")]
+    [InlineData("gate/merge")]
+    [InlineData("workflow/live")]
+    [InlineData("deployment/merge-fence")]
+    public async Task GenericMemoryCannotWriteOperatorAuthority(string key)
+    {
+        await _memory.RememberAsync(key, "retained");
+        var result = await _client.PostAsJsonAsync("/api/memory", new { key, body = "changed" });
+        Assert.Equal(HttpStatusCode.Forbidden, result.StatusCode);
+        Assert.Equal("retained", (await _memory.GetAsync(key))!.Body);
+        var removed = await _client.DeleteAsync("/api/memory/" + Uri.EscapeDataString(key));
+        Assert.True(removed.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound);
+        Assert.Equal("retained", (await _memory.GetAsync(key))!.Body);
+    }
+
     private readonly string _dbPath;
     private readonly MemoryStore _memory;
     private readonly IHost _host;

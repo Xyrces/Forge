@@ -4,10 +4,12 @@
 @implements IDisposable
 @using System.Net.Http.Json
 @using System.Text.Json
+@using Forge.Dashboard.Services
 
 <PageTitle>Run @RunId</PageTitle>
-<div class="page">
-    <a href="/runs" class="meta-text">← All runs</a>
+<div class="page run-detail">
+    <a href="@($"/runs{ProjectQuery(Project ?? ShellStore.Value.CurrentProjectId)}")" class="meta-text">← All runs</a>
+    @if (_loadError is not null) { <div class="banner banner--error" role="alert">Couldn’t refresh run: @_loadError <button class="btn" @onclick="LoadAsync">Retry</button></div> }
     @if (_notFound)
     {
         <div class="banner banner--error">Run not found: @RunId</div>
@@ -20,9 +22,10 @@
     {
         var v = _run.View;
         <div class="page-header">
-            <h1>@v.Role <span style="font-weight:400;color:var(--on-surface-variant)">run</span></h1>
+            <h1>@(v.TaskTitle ?? v.TaskId ?? "Planning run")</h1>
             <div class="page-header__meta">
-                <span class="pill @(v.Status == "succeeded" ? "pill--completed" : v.Status == "running" ? "pill--inprogress" : "pill--failed")">@v.Status</span>
+                <span class="pill @(v.Status == "succeeded" ? "pill--completed" : v.Status == "running" ? "pill--inprogress" : "pill--failed")">@WorkPresentation.RunOutcome(v.Status, v.Role)</span>
+                <span>@WorkPresentation.Role(v.Role)</span>
                 <span class="pill">@(v.ProjectId ?? "legacy")</span>
                 @if (v.ResumedSession == true)
                 {
@@ -57,11 +60,12 @@
             <div class="page-header__actions">
                 @if (v.TaskId is not null)
                 {
-                    <a class="btn" href="@($"/tasks/{v.TaskId}{ProjectQuery(v.ProjectId)}")">Task @v.TaskId</a>
+                    <a class="btn" href="@($"/tasks/{v.TaskId}?project={Uri.EscapeDataString(v.ScopeProjectId ?? Project ?? ShellStore.Value.CurrentProjectId ?? "")}&section=History%20%26%20runs")">View task</a>
                 }
                 <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
             </div>
         </div>
+        <p class="meta-text">This is the agent run outcome. Task history records verification, publication and delivery separately.</p>
         @if (v.Error is not null)
         {
             <div class="banner banner--error" style="margin-bottom:12px">
@@ -153,27 +157,50 @@
     [Parameter][SupplyParameterFromQuery(Name = "project")] public string? Project { get; set; }
 
     private RunDto? _run;
-    private readonly CancellationTokenSource _pollCts = new();
+    private CancellationTokenSource _pollCts = new();
+    private string? _loadedTarget;
+    private string Target => (Project ?? ShellStore.Value.CurrentProjectId) + "|" + RunId;
+    private int _loadGeneration;
+    private bool _disposed, _terminal;
 
-    protected override async Task OnInitializedAsync()
+    protected override async Task OnParametersSetAsync()
     {
-        await LoadAsync();
-        _ = PollLoopAsync();
+        if (_disposed || _loadedTarget == Target) return;
+        _loadedTarget = Target;
+        _pollCts.Cancel(); _pollCts.Dispose(); _pollCts = new();
+        var owner = _pollCts;
+        var token = owner.Token;
+        _run = null; _notFound = false; _loadError = null; _terminal = false;
+        await LoadAsync(token);
+        // An old navigation may finish after a new run has loaded. It must
+        // never borrow the new run's cancellation source and start another loop.
+        if (!_disposed && ReferenceEquals(owner, _pollCts) && !token.IsCancellationRequested && !_terminal)
+            _ = PollLoopAsync(token);
     }
 
-    private async Task PollLoopAsync()
+    private async Task PollLoopAsync(CancellationToken token)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
         try
         {
-            while (await timer.WaitForNextTickAsync(_pollCts.Token))
-                await LoadAsync();
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                if (_disposed || _terminal) return;
+                await LoadAsync(token);
+                if (_terminal) return;
+            }
         }
         catch (OperationCanceledException) { }
     }
 
-    private async Task LoadAsync()
+    private Task LoadAsync() => _disposed ? Task.CompletedTask : LoadAsync(_pollCts.Token);
+
+    private async Task LoadAsync(CancellationToken token)
     {
+        if (_disposed || token.IsCancellationRequested) return;
+        var target = Target;
+        var generation = ++_loadGeneration;
+        bool Current() => !_disposed && !token.IsCancellationRequested && target == Target && generation == _loadGeneration;
         try
         {
             // Run rows live in the OWNING project's store — read
@@ -186,31 +213,35 @@
             var lens = effectiveProject is { } pid
                 ? $"?projectId={Uri.EscapeDataString(pid)}"
                 : string.Empty;
-            var resp = await Http.GetAsync($"/api/agent-runs/{RunId}" + lens);
+            using var resp = await Http.GetAsync($"/api/agent-runs/{Uri.EscapeDataString(RunId)}" + lens, token);
+            if (!Current()) return;
             if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
                 _notFound = true;
-                _pollCts.Cancel();
+                _terminal = true;
                 await InvokeAsync(StateHasChanged);
                 return;
             }
             resp.EnsureSuccessStatusCode();
-            _run = await resp.Content.ReadFromJsonAsync<RunDto>();
+            var result = await resp.Content.ReadFromJsonAsync<RunDto>(token);
+            if (!Current()) return;
+            _run = result;
+            _loadError = null; _notFound = false;
             // Terminal runs don't need the 3s poll loop anymore.
-            if (_run?.View.Status is "succeeded" or "failed")
-            {
-                _pollCts.Cancel();
-            }
+            _terminal = _run?.View.Status is "succeeded" or "failed";
             await InvokeAsync(StateHasChanged);
         }
-        catch (OperationCanceledException) { throw; }
-        catch { /* transient */ }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex) { if (Current()) { _loadError = ex.Message; await InvokeAsync(StateHasChanged); } }
     }
 
     private bool _notFound;
+    private string? _loadError;
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true; ++_loadGeneration;
         _pollCts.Cancel();
         _pollCts.Dispose();
     }
@@ -228,7 +259,8 @@
         int? MessageCount, int? ToolCallCount, int? TextChars,
         string? Error, bool HasTranscript, DateTime? LastActivityAt,
         string? Phase, bool? ResumedSession, string? ProjectId,
-        long? InputTokens, long? OutputTokens, long? CacheReadTokens, long? CurrentContextTokens);
+        long? InputTokens, long? OutputTokens, long? CacheReadTokens, long? CurrentContextTokens,
+        string? TaskTitle, string? ScopeProjectId);
 
     private sealed record ChatMsg(string Kind, string Text, List<ToolCall> Calls);
     private sealed record ToolCall(string Name, string Args, string? Result);

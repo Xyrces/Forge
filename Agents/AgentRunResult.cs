@@ -1,4 +1,4 @@
-﻿namespace Forge.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// What <see cref="IAgentRunner.RunAsync"/> returns. Captures the response
@@ -8,12 +8,9 @@
 /// (c) feed the dashboard.
 ///
 /// <para>
-/// <see cref="SessionId"/> is a REFERENCE to the run's persisted
-/// session — the memory-store key the session JSON lives under
-/// (<c>session/&lt;project&gt;/&lt;task&gt;/&lt;role&gt;</c>), not the
-/// blob itself. The runner resumes that session automatically on the
-/// next run of the same task+role (pause/resume rework loop); callers
-/// pass <c>sessionId: null</c> and the runner resolves the rest.
+/// <see cref="SessionId"/> identifies the stored conversation for this project, task and role.
+/// Reviewer keys also include the reviewed commit. Callers can pass <c>sessionId: null</c>
+/// to resume the conversation associated with the current run.
 /// </para>
 /// </summary>
 public sealed record AgentRunResult(
@@ -21,5 +18,7 @@ public sealed record AgentRunResult(
     string? SessionId,
     long InputTokens,
     long OutputTokens,
-    TimeSpan Elapsed);
+    TimeSpan Elapsed,
+    Core.VerificationReceipt? Verification = null,
+    Core.Execution.WorkerPhaseTiming? Phases = null);
 

@@ -1,0 +1,143 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+@implements IDisposable
+
+<section class="intake-inbox" aria-label="Intake inbox">
+    @if (_error is not null)
+    {
+        <div class="banner banner--error" role="alert">@_error</div>
+    }
+    @if (_loading)
+    {
+        <p class="page-subtitle" role="status">Loading intake…</p>
+    }
+    else if (ProjectId is null)
+    {
+        <p>Choose a project to open Intake.</p>
+    }
+    else if (_page is { Items.Count: 0 })
+    {
+        <div class="intake-inbox__empty">
+            <h2>@(_previous.Count > 0 ? "This page is empty" : "What would you like to build?")</h2>
+            <p>@(_previous.Count > 0 ? "Items may have moved since you opened this page. Return to the previous page or refresh Intake." : "Start a new idea and work through it with Forge.")</p>
+        </div>
+    }
+    else if (_page is not null)
+    {
+        @foreach (var group in Groups)
+        {
+            var items = _page.Items.Where(item => item.Group == group.Key).ToArray();
+            @if (items.Length > 0)
+            {
+                <section class="intake-inbox__group" aria-label="@group.Label">
+                    <h2>@group.Label</h2>
+                    <div class="intake-inbox__rows">
+                        @foreach (var item in items)
+                        {
+                            <button class="intake-inbox__item" @onclick="() => Opened.InvokeAsync(item)" @key="(item.Kind, item.Id)">
+                                <span class="intake-inbox__title">@item.Title</span>
+                                <span class="intake-inbox__meta">
+                                    <span>@(item.Origin == "user" ? "From your conversation" : "Suggested by Forge")</span>
+                                    @if (item.Revision is { } revision) { <span>Revision @revision</span> }
+                                    <span>Updated @item.UpdatedAt.ToLocalTime().ToString("MMM d, h:mm tt")</span>
+                                </span>
+                                <span class="intake-inbox__action">@Action(item)</span>
+                            </button>
+                        }
+                    </div>
+                </section>
+            }
+        }
+    }
+    @if (!_loading && _page is not null && (_previous.Count > 0 || _page.NextCursor is not null))
+        {
+            <nav class="intake-inbox__pagination" aria-label="Intake pages">
+                <button class="btn" @onclick="PreviousAsync" disabled="@(_previous.Count == 0 || _loading)">Previous</button>
+                <span class="page-subtitle">Page @(_previous.Count + 1)</span>
+                <button class="btn" @onclick="NextAsync" disabled="@(_page.NextCursor is null || _loading)">Next</button>
+            </nav>
+        }
+</section>
+
+@code {
+    [Parameter] public string? ProjectId { get; set; }
+    [Parameter] public int RefreshVersion { get; set; }
+    [Parameter] public EventCallback<Item> Opened { get; set; }
+    public sealed record Item(string Kind, string Id, string? SessionId, string Title, string Origin,
+        int? Revision, DateTime? ApprovedAt, DateTime UpdatedAt, string Group);
+    private sealed record InboxPage(List<Item> Items, string? NextCursor);
+    private static readonly (string Key, string Label)[] Groups =
+        [("review", "Ready for your review"), ("suggestion", "Suggestions from Forge"),
+         ("discussion", "In conversation"), ("planning", "Approved for planning")];
+    private string? _project, _cursor, _error;
+    private int _version = -1;
+    private long _generation;
+    private bool _loading, _disposed;
+    private InboxPage? _page;
+    private readonly Stack<string?> _previous = new();
+    private CancellationTokenSource _request = new();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_project == ProjectId && _version == RefreshVersion) return;
+        if (_project != ProjectId) { _cursor = null; _previous.Clear(); }
+        _project = ProjectId;
+        _version = RefreshVersion;
+        await LoadAsync();
+    }
+
+    private static string Action(Item item) => item.Kind == "conversation" ? "Open conversation"
+        : item.SessionId is null ? "Discuss suggestion"
+        : item.ApprovedAt is null ? "Review proposal" : "View planning handoff";
+
+    private async Task LoadAsync()
+    {
+        _request.Cancel();
+        _request.Dispose();
+        _request = new();
+        var generation = ++_generation;
+        _loading = true;
+        _error = null;
+        _page = null;
+        try
+        {
+            if (_project is null) return;
+            var query = "projectId=" + Uri.EscapeDataString(_project);
+            if (_cursor is not null) query += "&cursor=" + Uri.EscapeDataString(_cursor);
+            var page = await Http.GetFromJsonAsync<InboxPage>("/api/intake/inbox?" + query, _request.Token)
+                ?? throw new InvalidOperationException("The intake response was empty.");
+            if (generation == _generation) _page = page;
+        }
+        catch (OperationCanceledException) when (generation != _generation || _disposed) { }
+        catch (Exception ex) { if (generation == _generation) _error = "Intake could not be loaded. " + ex.Message; }
+        finally { if (generation == _generation) _loading = false; }
+    }
+
+    public async Task RefreshAsync()
+    {
+        var load = LoadAsync();
+        await InvokeAsync(StateHasChanged);
+        await load;
+        if (!_disposed) await InvokeAsync(StateHasChanged);
+    }
+    private async Task NextAsync()
+    {
+        if (_page?.NextCursor is not { } next) return;
+        _previous.Push(_cursor);
+        _cursor = next;
+        await LoadAsync();
+    }
+    private async Task PreviousAsync()
+    {
+        if (_previous.Count == 0) return;
+        _cursor = _previous.Pop();
+        await LoadAsync();
+    }
+    public void Dispose()
+    {
+        _disposed = true;
+        ++_generation;
+        _request.Cancel();
+        _request.Dispose();
+    }
+}

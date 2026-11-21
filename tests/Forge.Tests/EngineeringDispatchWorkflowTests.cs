@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 using Forge.AgentTools;
@@ -54,6 +54,11 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         File.WriteAllText(Path.Combine(dir, "README.md"), "x");
         Run("git", "add README.md", dir);
         Run("git", "commit -q -m init", dir);
+        var origin = Path.Combine(dir, ".portHorizon", "fixture-origin.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(origin)!);
+        Run("git", $"init --bare -q \"{origin}\"", dir);
+        Run("git", $"remote add origin \"{origin}\"", dir);
+        Run("git", "push -q -u origin main", dir);
     }
 
     private static void Run(string exe, string args, string cwd)
@@ -70,6 +75,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         };
         using var p = Process.Start(psi)!;
         p.WaitForExit();
+        Assert.True(p.ExitCode == 0, p.StandardError.ReadToEnd());
     }
 
     private static IAgentRunner ScriptedRunner(string response)
@@ -94,6 +100,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
 
     private sealed class StubGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public int NextPrNumber { get; set; } = 7;
         public StubGitHub() : base(new AgentOptions().GitHub) { }
         public override Task<Octokit.PullRequest> CreatePullRequestAsync(
@@ -142,12 +149,13 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         await workflow.RunAsync(issue, CancellationToken.None);
 
         var after = await _issues.GetAsync(issue.Id);
-        Assert.Equal(IssueStatus.Completed, after!.Status);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
         Assert.NotNull(after.GetMetadata("worktreePath"));
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
     }
 
     [Fact]
-    public async Task Workflow_NoDiffShortCircuits()
+    public async Task Workflow_UnverifiedNoDiffRequeuesWithoutClaimingDelivery()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
         var workflow = new EngineeringDispatchWorkflow(
@@ -171,7 +179,9 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         await workflow.RunAsync(issue, CancellationToken.None);
 
         var after = await _issues.GetAsync(issue.Id);
-        Assert.Equal(IssueStatus.Completed, after!.Status);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
+        Assert.Null(after.GetMetadata("trustedExistingImplementation"));
         Assert.Null(after.GetMetadata("prNumber"));
     }
 }

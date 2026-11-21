@@ -2,13 +2,13 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/forge-first-k3s]
   pull_request:
-    branches: [main]
+    branches: [main, codex/forge-first-k3s]
 
 # Cancel superseded PR runs to save CI minutes.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -57,10 +57,14 @@ jobs:
         run: dotnet build Forge.sln --no-restore --configuration Release
 
       - name: Test
-        # The 2 RealLlmIntegrationTests are expected to skip on CI
-        # because the kilo JWT isn't in env. The remaining 402 tests
-        # should pass. Fail the job if any real test fails.
-        run: dotnet test Forge.sln --no-build --configuration Release --logger "console;verbosity=normal"
+        # Ordinary PR validation never invokes paid provider/media tests.
+        run: dotnet test Forge.sln --no-build --configuration Release --logger "console;verbosity=normal" --filter 'FullyQualifiedName!~RealLlmIntegrationTests&FullyQualifiedName!~MafAgentRunnerLiveTests&FullyQualifiedName!~MeshyLiveSmokeTests'
+
+      - name: Test release and installer protocol
+        run: python3 -m unittest discover -s tests/deployment -v
+
+      - name: Test repository privacy rules
+        run: python3 -m unittest discover -s tests/privacy -v
 
       - name: Run e2e harness
         # The harness spins up a fresh local repo, runs the
@@ -95,18 +99,3 @@ jobs:
             .portHorizon/benchmarks/**/grader-self-test.log
           include-hidden-files: true
           if-no-files-found: ignore
-
-      - name: Live verify Headroom sidecar (smoke)
-        # Bring up the Headroom proxy sidecar + verify it
-        # accepts a /v1/chat/completions request (HEADROOM ONLY;
-        # the actual cost savings are observed in production).
-        # Docs: deploy/docker-compose.headroom.yml + docs/headroom.md.
-        run: |
-          docker compose -f deploy/docker-compose.headroom.yml up -d
-          sleep 10  # give the proxy a moment to bind
-          curl -sf -X POST http://127.0.0.1:8787/v1/chat/completions \
-            -H "Authorization: Bearer dummy" \
-            -H "Content-Type: application/json" \
-            -d '{"model":"test","messages":[]}' \
-            -o /dev/null -w "HTTP %{http_code}\n" || true
-          docker compose -f deploy/docker-compose.headroom.yml down

@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Text;
+using Forge.AgentTools;
 using Microsoft.Extensions.Logging;
 using Forge.Configuration;
 
@@ -50,6 +50,11 @@ public sealed record ProjectSyncResult(bool Ok, string Branch);
 /// </summary>
 public sealed class ProjectCloner
 {
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, GitHubAppIdentities.Repository> AppScopes = new(StringComparer.Ordinal);
+    private static void RegisterAppScope(string path, string url)
+    {
+        if (GitHubAppIdentities.FromUrl(url) is { } scope) AppScopes[Path.GetFullPath(path)] = scope;
+    }
     private readonly string _dataRoot;
     private readonly ILogger<ProjectCloner>? _logger;
 
@@ -80,6 +85,7 @@ public sealed class ProjectCloner
             throw new InvalidOperationException($"Project '{project.Id}' has no RepoUrl.");
 
         var localPath = ForgesystemPaths.ProjectDir(_dataRoot, project.Id);
+        RegisterAppScope(localPath, project.RepoUrl);
         Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
 
         var gitDir = Path.Combine(localPath, ".git");
@@ -109,7 +115,7 @@ public sealed class ProjectCloner
                 $"git clone for project '{project.Id}' failed: {cloneResult.Stderr.Trim()}");
         }
 
-        if (isHttps && !string.IsNullOrEmpty(github?.Token))
+        if (isHttps && !string.IsNullOrEmpty(github?.Token) && GitHubAppIdentities.FromUrl(project.RepoUrl) is null)
         {
             // 1. Reset the stored remote URL to drop the PAT from .git/config.
             await ResetRemoteAsync(localPath, project.RepoUrl, ct);
@@ -231,21 +237,37 @@ public sealed class ProjectCloner
     }
 
     /// <summary>
-    /// Pull the latest from origin/<see cref="ProjectOptions.DefaultBranch"/>.
-    /// The result carries the branch actually synced — reconciliation
-    /// may discover the remote's real default branch when the stored
-    /// one doesn't exist there. Used by the manual
-    /// <c>POST /api/projects/{id}/sync</c> endpoint and as a sanity
-    /// check at startup (so the dashboard surfaces "remote is ahead
-    /// by N commits" via the UI).
+    /// Refresh a clean checkout from its exact configured remote branch.
+    /// Local divergence, dirty work, or a missing origin requires explicit repair.
+    /// Shared by operator sync, startup, and planning; never resets local work.
     /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> SyncLocks =
+        new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+
     public async Task<ProjectSyncResult> SyncAsync(ProjectOptions project, GitHubOptions? github, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        var path = Path.GetFullPath(string.IsNullOrWhiteSpace(project.Root)
+            ? ForgesystemPaths.ProjectDir(_dataRoot, project.Id) : project.Root);
+        var gate = SyncLocks.GetOrAdd(path, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try { return await SyncCoreAsync(project, github, ct); }
+        finally { gate.Release(); }
+    }
+
+    private async Task<ProjectSyncResult> SyncCoreAsync(ProjectOptions project, GitHubOptions? github, CancellationToken ct)
     {
         if (project is null) throw new ArgumentNullException(nameof(project));
         var branch = string.IsNullOrWhiteSpace(project.DefaultBranch) ? "main" : project.DefaultBranch;
-        var localPath = ForgesystemPaths.ProjectDir(_dataRoot, project.Id);
+        var localPath = string.IsNullOrWhiteSpace(project.Root)
+            ? ForgesystemPaths.ProjectDir(_dataRoot, project.Id) : Path.GetFullPath(project.Root);
+        RegisterAppScope(localPath, project.RepoUrl);
         if (!Directory.Exists(Path.Combine(localPath, ".git")))
         {
+            if (!string.Equals(Path.GetFullPath(localPath), Path.GetFullPath(ForgesystemPaths.ProjectDir(_dataRoot, project.Id)),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                return new ProjectSyncResult(false, branch);
+
             // The registration-time clone may have failed (e.g. a
             // stale global PAT while the per-project secret is valid);
             // sync is the documented retry path, so attempt the clone.
@@ -263,28 +285,67 @@ public sealed class ProjectCloner
             }
         }
 
-        // A scaffolded repo (registration-time clone failed → local
-        // git-init fallback) has no origin: reconcile against RepoUrl
-        // instead of pulling from a remote that isn't there.
-        var remoteCheck = await RunGitAsync(localPath, "remote", "get-url", "origin");
-        if (remoteCheck.ExitCode != 0)
+        var scaffoldMarker = Path.Combine(localPath, ".git", "forge-scaffold-head");
+        if (File.Exists(scaffoldMarker))
         {
-            if (string.IsNullOrWhiteSpace(project.RepoUrl))
-            {
-                _logger?.LogWarning("Project '{Id}': no origin remote and no RepoUrl to reconcile against", project.Id);
+            var recorded = (await File.ReadAllTextAsync(scaffoldMarker, ct)).Trim();
+            var head = await RunGitAsync(localPath, ct, "rev-parse", "HEAD");
+            var status = await RunGitAsync(localPath, ct, "status", "--porcelain", "--untracked-files=all");
+            if (!System.Text.RegularExpressions.Regex.IsMatch(recorded, "^[0-9a-f]{40}$")
+                || head.ExitCode != 0 || head.Stdout.Trim() != recorded || status.ExitCode != 0 || status.Stdout.Length != 0)
                 return new ProjectSyncResult(false, branch);
-            }
-            return await ReconcileScaffoldAsync(project, localPath, branch, github, ct);
+            var healed = await ReconcileScaffoldAsync(project, localPath, branch, github, ct);
+            if (healed.Ok) File.Delete(scaffoldMarker);
+            return healed;
         }
 
-        var result = await RunGitAsync(localPath,
-            "pull", "--ff-only", "origin", branch);
-        if (result.ExitCode != 0)
+        // Do not infer that an origin-less repository is a disposable scaffold.
+        // Automatic refresh must never reset unknown local work.
+        var remoteCheck = await RunGitAsync(localPath, ct, "remote", "get-url", "origin");
+        if (remoteCheck.ExitCode != 0)
         {
-            _logger?.LogWarning("Project '{Id}': pull failed: {Err}", project.Id, result.Stderr.Trim());
+            _logger?.LogWarning("Project '{Id}': origin is missing; explicit repository repair is required, preserving local work", project.Id);
             return new ProjectSyncResult(false, branch);
         }
-        return new ProjectSyncResult(true, branch);
+
+        var current = await RunGitAsync(localPath, ct, "symbolic-ref", "--short", "HEAD");
+        var dirty = await RunGitAsync(localPath, ct, "status", "--porcelain", "--untracked-files=all");
+        if (current.ExitCode != 0 || current.Stdout.Trim() != branch || dirty.ExitCode != 0 || dirty.Stdout.Length != 0)
+        {
+            _logger?.LogWarning("Project '{Id}': refresh requires a clean checkout on configured branch {Branch}; preserving local work", project.Id, branch);
+            return new ProjectSyncResult(false, branch);
+        }
+
+        var observedRef = "refs/forge/planning/" + Guid.NewGuid().ToString("N");
+        try
+        {
+            var fetch = await RunGitAsync(localPath, ct, "fetch", "--no-tags", "--no-write-fetch-head", "origin", $"+refs/heads/{branch}:{observedRef}");
+            if (fetch.ExitCode != 0) return new ProjectSyncResult(false, branch);
+            var fetched = await RunGitAsync(localPath, ct, "rev-parse", "--verify", observedRef + "^{commit}");
+            var sha = fetched.Stdout.Trim();
+            if (fetched.ExitCode != 0 || !System.Text.RegularExpressions.Regex.IsMatch(sha, "^[0-9a-f]{40}$"))
+                return new ProjectSyncResult(false, branch);
+            var ancestor = await RunGitAsync(localPath, ct, "merge-base", "--is-ancestor", "HEAD", sha);
+            if (ancestor.ExitCode != 0)
+            {
+                _logger?.LogWarning("Project '{Id}': local commits differ from remote; preserving checkout", project.Id);
+                return new ProjectSyncResult(false, branch);
+            }
+            var result = await RunGitAsync(localPath, ct, "merge", "--ff-only", sha);
+            if (result.ExitCode != 0) return new ProjectSyncResult(false, branch);
+            return new ProjectSyncResult(true, branch);
+        }
+        finally
+        {
+            try
+            {
+                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var deleted = await RunGitAsync(localPath, cleanup.Token, "update-ref", "-d", observedRef);
+                if (deleted.ExitCode != 0) _logger?.LogWarning("Project '{Id}': could not remove temporary source ref", project.Id);
+            }
+            catch (Exception ex) { _logger?.LogWarning(ex, "Project '{Id}': temporary source ref cleanup failed", project.Id); }
+        }
+
     }
 
     /// <summary>
@@ -303,14 +364,15 @@ public sealed class ProjectCloner
         _logger?.LogInformation("Project '{Id}': no origin remote; reconciling scaffold against {Url}",
             project.Id, ScrubUrl(project.RepoUrl));
 
-        var add = await RunGitAsync(localPath, "remote", "add", "origin", project.RepoUrl);
+        var exists = await RunGitAsync(localPath, ct, "remote", "get-url", "origin");
+        var add = await RunGitAsync(localPath, ct, "remote", exists.ExitCode == 0 ? "set-url" : "add", "origin", project.RepoUrl);
         if (add.ExitCode != 0)
         {
             _logger?.LogWarning("Project '{Id}': remote add failed: {Err}", project.Id, add.Stderr.Trim());
             return new ProjectSyncResult(false, branch);
         }
 
-        if (IsHttps(project.RepoUrl) && !string.IsNullOrEmpty(github?.Token))
+        if (IsHttps(project.RepoUrl) && !string.IsNullOrEmpty(github?.Token) && GitHubAppIdentities.FromUrl(project.RepoUrl) is null)
         {
             var credPath = Path.Combine(localPath, ".forge", "git-credentials");
             Directory.CreateDirectory(Path.GetDirectoryName(credPath)!);
@@ -321,10 +383,10 @@ public sealed class ProjectCloner
                     File.SetUnixFileMode(credPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             }
             catch { /* non-POSIX — best effort */ }
-            await RunGitAsync(localPath, "config", "credential.helper", $"store --file={credPath}");
+            await RunGitAsync(localPath, ct, "config", "credential.helper", $"store --file={credPath}");
         }
 
-        var fetch = await RunGitAsync(localPath, "fetch", "origin", branch);
+        var fetch = await RunGitAsync(localPath, ct, "fetch", "origin", branch);
         if (fetch.ExitCode != 0)
         {
             // The stored branch may predate detection support (a "main"
@@ -339,7 +401,7 @@ public sealed class ProjectCloner
                 "Project '{Id}': stored branch '{Stored}' not on remote; using detected default '{Detected}'",
                 project.Id, branch, detected);
             branch = detected;
-            fetch = await RunGitAsync(localPath, "fetch", "origin", branch);
+            fetch = await RunGitAsync(localPath, ct, "fetch", "origin", branch);
             if (fetch.ExitCode != 0)
             {
                 _logger?.LogWarning("Project '{Id}': fetch failed: {Err}", project.Id, fetch.Stderr.Trim());
@@ -347,7 +409,7 @@ public sealed class ProjectCloner
             }
         }
 
-        var align = await RunGitAsync(localPath, "checkout", "-B", branch, $"origin/{branch}");
+        var align = await RunGitAsync(localPath, ct, "checkout", "-B", branch, $"origin/{branch}");
         if (align.ExitCode != 0)
         {
             _logger?.LogWarning("Project '{Id}': align to origin/{Branch} failed: {Err}", project.Id, branch, align.Stderr.Trim());
@@ -356,12 +418,13 @@ public sealed class ProjectCloner
         _logger?.LogInformation("Project '{Id}': scaffold reconciled with origin/{Branch}", project.Id, branch);
         // Stamp origin/HEAD so the clone's own pull info reflects the
         // remote default from here on (best effort).
-        await RunGitAsync(localPath, "remote", "set-head", "origin", "--auto");
+        await RunGitAsync(localPath, ct, "remote", "set-head", "origin", "--auto");
         return new ProjectSyncResult(true, branch);
     }
 
     private static (string effectiveUrl, bool isHttps) BuildAuthenticatedUrl(string repoUrl, string? token)
     {
+        if (GitHubAppIdentities.FromUrl(repoUrl) is not null) return (repoUrl, true);
         if (string.IsNullOrEmpty(token)) return (repoUrl, IsHttps(repoUrl));
         if (!IsHttps(repoUrl)) return (repoUrl, false);
 
@@ -402,9 +465,20 @@ public sealed class ProjectCloner
         return url;
     }
 
+    private static Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(string cwd, params string[] args)
+        => RunGitAsync(cwd, CancellationToken.None, args);
+
     private static async Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(
-        string cwd, params string[] args)
+        string cwd, CancellationToken ct, params string[] args)
     {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+        {
+            AppScopes.TryGetValue(Path.GetFullPath(cwd), out var scope);
+            var explicitUrl = args.FirstOrDefault(a => a.StartsWith("https://github.com/", StringComparison.Ordinal));
+            if (explicitUrl is not null) scope = GitHubAppIdentities.FromUrl(explicitUrl);
+            var isolated = await ControllerGitRunner.RunAsync(cwd, args, scope, ct);
+            return (isolated.ExitCode, isolated.Stdout, isolated.Stderr);
+        }
         var psi = new ProcessStartInfo
         {
             FileName = "git",
@@ -428,7 +502,17 @@ public sealed class ProjectCloner
         using var p = Process.Start(psi)!;
         var stdoutTask = p.StandardOutput.ReadToEndAsync();
         var stderrTask = p.StandardError.ReadToEndAsync();
-        await p.WaitForExitAsync();
-        return (p.ExitCode, await stdoutTask, await stderrTask);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2));
+        try { await p.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException)
+        {
+            if (!p.HasExited) p.Kill(entireProcessTree: true);
+            await p.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(stdoutTask, stderrTask);
+            throw;
+        }
+        var stdout = await stdoutTask; var stderr = await stderrTask;
+        return (p.ExitCode, stdout, stderr);
     }
 }

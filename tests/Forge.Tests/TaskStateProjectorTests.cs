@@ -149,11 +149,11 @@ public class TaskStateProjectorTests
     }
 
     [Fact]
-    public void Merged_Completed_WithPr_Merged()
+    public void Completed_WithPrAlone_DoesNotClaimMerged()
     {
         var task = Task(IssueStatus.Completed, new() { ["prNumber"] = "41" });
         var info = TaskStateProjector.Derive(task, null, false, Now);
-        Assert.Equal(TaskLifecycleState.Merged, info.State);
+        Assert.Equal(TaskLifecycleState.Completed, info.State);
     }
 
     [Fact]

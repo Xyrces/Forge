@@ -107,6 +107,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
     private readonly StageGates? _gates;
     private readonly Core.TaskStateMachine? _lifecycle;
     private readonly Core.Messaging.IEventPublisher? _eventPublisher;
+    private readonly Func<string, string, CancellationToken, Task<bool>>? _hasDurableWorker;
 
     public ProjectDispatchBundleFactory(
         AgentOptions options,
@@ -122,7 +123,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         ISecretStore? secrets = null,
         StageGates? gates = null,
         Core.TaskStateMachine? lifecycle = null,
-        Core.Messaging.IEventPublisher? eventPublisher = null)
+        Core.Messaging.IEventPublisher? eventPublisher = null,
+        Func<string, string, CancellationToken, Task<bool>>? hasDurableWorker = null)
     {
         _options = options;
         _dataRoot = dataRoot;
@@ -138,6 +140,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         _gates = gates;
         _lifecycle = lifecycle;
         _eventPublisher = eventPublisher;
+        _hasDurableWorker = hasDurableWorker;
     }
 
     /// <summary>
@@ -208,6 +211,37 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         return parts.Length >= 2 ? (parts[0], parts[1]) : null;
     }
 
+    private (GitHubService GitHub, GitWorktreeService Worktrees) CreateRepositoryServices(ProjectOptions project)
+    {
+        var gitHub = new GitHubService(BuildGitHubOptions(project));
+        var worktrees = new GitWorktreeService(
+            new WorkspaceOptions
+            {
+                Root = project.Root,
+                WorktreeRoot = ForgesystemPaths.WorktreeDir(_dataRoot, project.Id),
+                DefaultBranch = string.IsNullOrWhiteSpace(project.DefaultBranch) ? "main" : project.DefaultBranch,
+            },
+            _loggerFactory.CreateLogger<GitWorktreeService>(),
+            githubToken: gitHub.UsesAppIdentity ? null : ResolveGitHubToken(project.Id),
+            publisherToken: gitHub.UsesAppIdentity ? gitHub.GetPublisherTokenAsync : null,
+            publisherRepository: $"https://github.com/{gitHub.Owner}/{gitHub.Repo}");
+        return (gitHub, worktrees);
+    }
+
+    private Workers.IntegratedHeadVerifier? CreateIntegratedHeadVerifier(ProjectOptions project,
+        IIssueStore issues, GitHubService gitHub, GitWorktreeService worktrees)
+        => _runner is Workers.KubernetesAgentRunner workers
+            ? new Workers.IntegratedHeadVerifier(issues, worktrees, gitHub, workers, project.Id,
+                project.VerifyCommands, _loggerFactory.CreateLogger<Workers.IntegratedHeadVerifier>())
+            : null;
+
+    internal Task<bool> VerifyCompletedHeadAsync(Projects.ProjectContext project, IssueRecord task, CancellationToken ct)
+    {
+        var (gitHub, worktrees) = CreateRepositoryServices(project.Options);
+        var verifier = CreateIntegratedHeadVerifier(project.Options, project.Issues, gitHub, worktrees);
+        return verifier?.EnsureAsync(task, null, ct) ?? Task.FromResult(false);
+    }
+
     /// <summary>
     /// Construct a bundle for the given project. The bootstrap is
     /// idempotent (runs `git clone` if RepoUrl set, else falls back
@@ -224,7 +258,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         var dbPath = ForgesystemPaths.IssuesDb(_dataRoot, project.Id);
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         var issueStore = new IssueStore(
-            Core.Db.ForgeDb.ForProject(_options.Db.IsSqlServer, _options.Db.ConnectionString, project.Id, dbPath),
+            Core.Db.ForgeDb.ForProject(_options.Db.IsSqlServer, _options.Db.ConnectionString, project.Id, dbPath, _options.Db.AutoMigrate),
             project.Id, _eventPublisher);
         var agents = new AgentStore(issueStore);
         var sprints = new SprintStore(issueStore);
@@ -233,17 +267,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         var designArtifacts = new DesignArtifactStore(issueStore.Db);
         var artOutputs = new ArtOutputStore(issueStore.Db);
 
-        var worktrees = new GitWorktreeService(
-            new WorkspaceOptions
-            {
-                Root = ensured.Project.Root,
-                WorktreeRoot = ForgesystemPaths.WorktreeDir(_dataRoot, project.Id),
-                DefaultBranch = string.IsNullOrWhiteSpace(ensured.Project.DefaultBranch) ? "main" : ensured.Project.DefaultBranch,
-            },
-            _loggerFactory.CreateLogger<GitWorktreeService>(),
-            githubToken: ResolveGitHubToken(project.Id));
-
-        var gitHub = new GitHubService(BuildGitHubOptions(ensured.Project));
+        var (gitHub, worktrees) = CreateRepositoryServices(ensured.Project);
+        var verifier = CreateIntegratedHeadVerifier(ensured.Project, issueStore, gitHub, worktrees);
 
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issueStore,
@@ -272,7 +297,15 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
             // Watch-lane QA stage (project $qa flag): QA playthrough
             // before review; the merge gate requires qaVerdict=pass at
             // the head and a fail verdict requeues a rework round.
-            qaEnabled: project.QaEnabled);
+            qaEnabled: project.QaEnabled,
+            hasDurableWorker: _hasDurableWorker is null ? null : (id, ct) => _hasDurableWorker(project.Id, id, ct),
+            joinTaskWorkers: async (id, ct) =>
+            {
+                if (_runner is not IReviewWorkerLifecycle lifecycle) return false;
+                foreach (var role in new[] { AgentType.CoreDev, AgentType.ClientDev, AgentType.QA, AgentType.Reviewer })
+                    if (await lifecycle.HasUntrackedReviewWorkerAsync(role, project.Id, id, ct)) return false;
+                return true;
+            }, projectId: project.Id, verifyMergeHead: verifier is null ? null : verifier.EnsureAsync);
 
         return new ProjectDispatchBundle(
             ensured.Project,

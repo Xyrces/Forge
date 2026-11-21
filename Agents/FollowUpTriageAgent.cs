@@ -50,13 +50,16 @@ public sealed class FollowUpTriageAgent : IFollowUpTriage
                     new ChatMessage(ChatRole.User, prompt),
                 },
                 cancellationToken: ct);
+            ct.ThrowIfCancellationRequested();
             var text = response.Text ?? "";
-            return Parse(text, _logger);
+            return Parse(text, _logger)
+                ?? throw new InvalidOperationException("Follow-up triage returned no valid decision; explicit review is required.");
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "FollowUpTriage: triage run failed (project={Project}); caller falls back to 1:1 materialization", projectId);
-            return null;
+            _logger.LogWarning(ex, "FollowUpTriage: triage run failed (project={Project}); durable caller must retain sources for explicit review", projectId);
+            throw;
         }
     }
 

@@ -14,7 +14,8 @@ public static class AgentRunEndpoints
     public static void MapAgentRunEndpoints(
         WebApplication app,
         AgentRunStore runs,
-        Projects.ProjectContextFactory? projectContexts = null)
+        Projects.ProjectContextFactory? projectContexts = null,
+        IIssueStore? primaryIssues = null)
     {
         // Multi-project: agent_run is per-project workload data — the
         // runner writes each run to the OWNING project's schema
@@ -42,8 +43,12 @@ public static class AgentRunEndpoints
             // The resolved store IS the project scope — no column
             // filter (a filter would hide legacy project_id NULL rows
             // stranded in the primary store).
-            var active = await store!.ListActiveAsync(ct);
+            var active = await store!.ListActiveAsync(ct, taskId);
             var recent = await store.ListRecentAsync(limit: 50, taskId: taskId, ct: ct);
+            var issues = projectId is null ? primaryIssues : projectContexts?.Find(projectId)?.Issues;
+            var titles = new Dictionary<string, string?>();
+            foreach (var id in active.Concat(recent).Select(r => r.TaskId).OfType<string>().Distinct())
+                titles[id] = issues is null ? null : (await issues.GetAsync(id, ct))?.Title;
             return Results.Json(new
             {
                 // The task detail page renders BOTH buckets — the
@@ -53,8 +58,9 @@ public static class AgentRunEndpoints
                 // CoreDev run rendered on task-167's page).
                 active = active
                     .Where(r => taskId is null || r.TaskId == taskId)
-                    .Select(ToView),
-                recent = recent.Select(ToView),
+                    .Select(r => ToView(r, r.TaskId is { } id ? titles.GetValueOrDefault(id) : null, projectId)),
+                recent = recent.Select(r => ToView(r, r.TaskId is { } id ? titles.GetValueOrDefault(id) : null, projectId)),
+                historyLimit = 50,
             });
         });
 
@@ -64,21 +70,25 @@ public static class AgentRunEndpoints
             if (err is not null) return err;
             var run = await store!.GetAsync(id, ct);
             if (run is null) return Results.NotFound();
+            var issues = projectId is null ? primaryIssues : projectContexts?.Find(projectId)?.Issues;
+            var title = issues is not null && run.TaskId is not null ? (await issues.GetAsync(run.TaskId, ct))?.Title : null;
             object transcript = run.TranscriptJson is null
                 ? Array.Empty<object>()
                 : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(run.TranscriptJson);
             return (IResult)Results.Json(new
             {
-                view = ToView(run),
+                view = ToView(run, title, projectId),
                 transcript,
             });
         });
     }
 
-    private static object ToView(AgentRunStore.AgentRunRecord r) => new
+    private static object ToView(AgentRunStore.AgentRunRecord r, string? title = null, string? scope = null) => new
     {
         id = r.Id,
         taskId = r.TaskId,
+        taskTitle = title,
+        scopeProjectId = scope ?? r.ProjectId,
         role = r.Role,
         model = r.Model,
         status = r.Status,

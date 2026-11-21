@@ -18,13 +18,14 @@
     Also exclude the project directory itself (so SDK default Compile
     items own sources placed under Forge.Core/), any stale root obj/
     or bin/ directories left behind by builds before the project move,
+    and temporary test repositories under .test-temp/,
     and the gitignored .portHorizon/ + .forge/ state directories (e2e
     clones and agent worktrees under them are full repo copies whose
     .cs files would otherwise be compiled twice — live build break
     2026-08-14 with .forge/worktrees/task-681 present).
   -->
   <ItemGroup>
-    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\Forge.Core\**\*.cs;..\obj\**\*.cs;..\bin\**\*.cs;..\.portHorizon\**\*.cs;..\.forge\**\*.cs" />
+    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\Forge.Core\**\*.cs;..\obj\**\*.cs;..\bin\**\*.cs;..\.portHorizon\**\*.cs;..\.forge\**\*.cs;..\.test-temp\**\*.cs" />
     <None Remove="..\tests\**;..\tools\**;..\Forge.UI\**" />
     <EmbeddedResource Remove="..\tests\**" />
   </ItemGroup>
@@ -62,6 +63,7 @@
     <PackageReference Include="Microsoft.Agents.AI.DurableTask" Version="1.1.0-preview.260410.1" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
     <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.0.2" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageReference Include="Microsoft.DurableTask.Client.AzureManaged" Version="1.18.0" />
     <PackageReference Include="Microsoft.DurableTask.Worker.AzureManaged" Version="1.18.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />

@@ -55,7 +55,7 @@ A single-project setup with the legacy `workspace.root` returns:
 [{
   "id": "default",
   "name": "Default",
-  "root": "C:\\Users\\jtn50\\repos\\gamedev\\PortHorizon",
+  "root": "C:\\Users\\forge-operator\\projects\\PortHorizon",
   "roles": {},
   "pending": 0, "inProgress": 0, "completed": 0, "failed": 0,
   "slots": [
@@ -81,14 +81,14 @@ into your existing file). Restart the orchestrator. The legacy
       {
         "id": "porthorizon",
         "name": "PortHorizon",
-        "root": "C:\\Users\\jtn50\\repos\\gamedev\\PortHorizon",
+        "root": "C:\\Users\\forge-operator\\projects\\PortHorizon",
         "skillPlaybookUrl": "https://github.com/Xyrces/godot-ecs-gamedev-playbook",
         "roles": { "coredev": 2, "clientdev": 2, "reviewer": 2, "intake": 1, "designer": 1, "artist": 1 }
       },
       {
         "id": "suikoden-launcher",
         "name": "Suikoden Launcher",
-        "root": "C:\\Users\\jtn50\\repos\\gamedev\\SuikodenLauncher",
+        "root": "C:\\Users\\forge-operator\\projects\\SuikodenLauncher",
         "roles": { "coredev": 1, "clientdev": 2, "reviewer": 1, "artist": 2 }
       }
     ]
@@ -167,7 +167,7 @@ DOES live under the project's actual `root`, at `{root}/.forge/worktrees/`
 to `primary.Root`, independent of `ProjectBootstrap`'s (currently
 unused by the dispatch loop) `WorktreeParent` field. This is what lets
 Forge maintain itself: the `forge` project's `root` points at the real
-dev clone (e.g. `C:\Users\jtn50\repos\gamedev\Forge`), agent worktrees
+dev clone (e.g. `C:\Users\forge-operator\projects\Forge`), agent worktrees
 land inside it as `.forge/worktrees/agent/<taskId>/` and get committed
 + PR'd normally, while the project's issues/memory/deployment state
 stays out of that repo entirely.
@@ -221,7 +221,7 @@ There's nothing project-registry-specific about Forge's own repo — it
 registers exactly like any other entry in `projects[]`:
 
 ```json
-{ "id": "forge", "name": "Forge", "root": "C:\\Users\\jtn50\\repos\\gamedev\\Forge", "roles": { ... } }
+{ "id": "forge", "name": "Forge", "root": "C:\\Users\\forge-operator\\projects\\Forge", "roles": { ... } }
 ```
 
 Once registered, agents open PRs against whatever `github.owner`/`repo`

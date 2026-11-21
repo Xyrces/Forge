@@ -304,6 +304,9 @@ public sealed class DotnetCodebaseGraphBuilder : ICodebaseGraphBuilder
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
+            using var isolation = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE"))
+                ? null : new Forge.AgentTools.IsolatedGitMetadata(repoRoot);
+            isolation?.Configure(psi);
             using var p = Process.Start(psi);
             if (p is null) return null;
             await p.WaitForExitAsync(ct);
@@ -329,6 +332,9 @@ public sealed class DotnetCodebaseGraphBuilder : ICodebaseGraphBuilder
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
+            using var isolation = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE"))
+                ? null : new Forge.AgentTools.IsolatedGitMetadata(repoRoot);
+            isolation?.Configure(psi);
             using var p = Process.Start(psi);
             if (p is null) return Array.Empty<string>();
             await p.WaitForExitAsync(ct);

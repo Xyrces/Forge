@@ -73,6 +73,24 @@ public class QueueEndpointTests : IDisposable
         => await _client.GetFromJsonAsync<JsonElement>("/api/queue");
 
     [Fact]
+    public async Task BoundedPreviewKeepsExactTotalsAndOriginalWaitSemantics()
+    {
+        var sprint = await _sprints.CreateAsync(new("Preview", "goal", DateTime.UtcNow, DateTime.UtcNow));
+        for (var i = 0; i < 14; i++)
+        {
+            var task = await GroomedTaskAsync("member " + i);
+            await _sprints.AddIssueAsync(sprint.Id, task.Id);
+        }
+        var all = await GetQueueAsync();
+        var preview = await _client.GetFromJsonAsync<JsonElement>("/api/queue?limit=3");
+        Assert.Equal(14, preview.GetProperty("total").GetInt32());
+        Assert.Equal(3, preview.GetProperty("items").GetArrayLength());
+        Assert.Equal(all.GetProperty("items").EnumerateArray().Take(3).Select(i => i.GetProperty("issueId").GetString()),
+            preview.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("issueId").GetString()));
+        Assert.All(preview.GetProperty("items").EnumerateArray(), item => Assert.Equal("ready", item.GetProperty("wait").GetString()));
+    }
+
+    [Fact]
     public async Task Queue_NoActiveSprint_Empty()
     {
         await GroomedTaskAsync("orphan");

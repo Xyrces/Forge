@@ -54,28 +54,39 @@ public sealed class DesignerRunStore
     private string T(string name) => _db.Dialect.Table(name);
 
     public string DbPath => _dbPath;
+    public bool UsesDatabase(IDbConnectionFactory db) => _db.Provider == db.Provider && _db.Qualifier == db.Qualifier
+        && _db.ConnectionString == db.ConnectionString;
 
     public async Task<DesignerRun> StartAsync(
         string specId, DesignerTriggerKind trigger, CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await Initiatives.InitiativeDb.LockAsync(conn, tx, _db.Dialect, ct);
         await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
             ? $"""
                 INSERT INTO {T("designer_run")}(ts, spec_id, trigger_kind, status)
                 OUTPUT INSERTED.id
-                VALUES(@ts, @spec, @trigger, 'started');
+                SELECT @ts, @spec, @trigger, 'started'
+                WHERE NOT EXISTS (SELECT 1 FROM {T("initiative_ingestion")} WHERE spec_id=@spec AND refinement_state<>'Completed');
                 """
             : """
                 INSERT INTO designer_run(ts, spec_id, trigger_kind, status)
-                VALUES(@ts, @spec, @trigger, 'started')
+                SELECT @ts, @spec, @trigger, 'started'
+                WHERE NOT EXISTS (SELECT 1 FROM initiative_ingestion WHERE spec_id=@spec AND refinement_state<>'Completed')
                 RETURNING id
                 """;
         cmd.AddParam("@ts", now.ToString(IssueStore.DateFormat));
         cmd.AddParam("@spec", specId);
         cmd.AddParam("@trigger", trigger.ToString().ToLowerInvariant());
-        var id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
+        var inserted = await cmd.ExecuteScalarAsync(ct);
+        if (inserted is null || inserted is DBNull)
+            throw new InvalidOperationException("Specification refinement is pending; design cannot start.");
+        var id = Convert.ToInt64(inserted);
+        await tx.CommitAsync(ct);
         return new DesignerRun(
             Id: id, Ts: now, SpecId: specId, Trigger: trigger,
             Status: DesignerRunStatus.Started, NewSpecStatus: null,
@@ -133,7 +144,7 @@ public sealed class DesignerRunStore
                 SELECT {d.TopParam("@limit")}id, ts, spec_id, trigger_kind, status, new_spec_status,
                        design_artifact_ids, hygiene_report, error, duration_ms
                 FROM {T("designer_run")}
-                ORDER BY ts DESC
+                ORDER BY ts DESC, id DESC
                 {d.LimitParam("@limit")}
                 """;
         }
@@ -144,7 +155,7 @@ public sealed class DesignerRunStore
                        design_artifact_ids, hygiene_report, error, duration_ms
                 FROM {T("designer_run")}
                 WHERE spec_id = @spec
-                ORDER BY ts DESC
+                ORDER BY ts DESC, id DESC
                 {d.LimitParam("@limit")}
                 """;
             cmd.AddParam("@spec", specId);
@@ -167,6 +178,19 @@ public sealed class DesignerRunStore
                 DurationMs: rd.GetInt32(9)));
         }
         return list;
+    }
+
+    /// <summary>Read this run's output independently of the spec's later pipeline state.</summary>
+    public async Task<DesignerCommittedDecision?> ReadCommittedDecisionAsync(long runId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT new_spec_status,design_artifact_ids FROM {T("designer_run")} WHERE id=@id AND status='succeeded' AND new_spec_status IS NOT NULL";
+        cmd.AddParam("@id", runId);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        return new DesignerCommittedDecision(Enum.Parse<SpecStatus>(reader.GetString(0)),
+            reader.IsDBNull(1) ? [] : JsonSerializer.Deserialize<List<string>>(reader.GetString(1)) ?? []);
     }
 
     private static string StatusToDb(DesignerRunStatus s) => s switch
@@ -196,6 +220,8 @@ public sealed class DesignerRunStore
 }
 
 public enum DesignerTriggerKind { Manual, Scheduled }
+
+public sealed record DesignerCommittedDecision(SpecStatus Status, IReadOnlyList<string> ArtifactIds);
 
 public enum DesignerRunStatus { Started, Succeeded, HygieneFailed, LlmFailed }
 

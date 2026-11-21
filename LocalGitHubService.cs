@@ -1,7 +1,8 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Diagnostics;
 using Octokit;
+using Forge.Reviewer;
 
 namespace Forge;
 
@@ -28,19 +29,74 @@ namespace Forge;
 /// </para>
 ///
 /// <para>
-/// <b>Scope:</b> the harness verifies "the orchestrator opened
-/// the right PR with the right diff". It does NOT verify the
-/// PRWatcher verdict loop (PR merge + branch delete + final
-/// issue Completed transition). That flow still uses the real
-/// GitHubService call sites; the harness short-circuits the
-/// merge step to keep the test bounded. Stage B's webhook-driven
-/// PR merge signal will close that gap; until then the
-/// integration test surface is "PR was opened correctly",
-/// which is the operator's primary acceptance criterion.
+/// <b>Scope:</b> engineering dispatch and PRWatcher lifecycle against a
+/// simulated local GitHub service. Approval and CI are supplied by the
+/// harness. Merge observation models a fast-forward at the accepted head;
+/// it does not assert that a real GitHub merge or CI service ran.
 /// </para>
 /// </remarks>
 public sealed class LocalGitHubService : GitHubService
 {
+    public override bool RequireFormalReview => false;
+    public override string? ReviewerLogin => "local-reviewer[bot]";
+
+    public override Task EnsureReviewerIdentityAsync(int prNumber, CancellationToken ct) => Task.CompletedTask;
+
+    public override Task<PublishedReview?> FindPublishedReviewAsync(int prNumber, ReviewDraft draft, string marker, CancellationToken ct)
+        => Task.FromResult(_prStore.ReviewReceipts.GetValueOrDefault((prNumber, marker)));
+
+    public override Task<PublishedReview> PublishFormalReviewAsync(int prNumber, ReviewDraft draft, string marker, CancellationToken ct)
+    {
+        var receipt = _prStore.ReviewReceipts.GetOrAdd((prNumber, marker), _ => new(draft.Round,
+            draft.HeadSha, draft.Verdict, draft.Summary, ReviewerLogin!, "", DateTimeOffset.UtcNow, draft.Findings));
+        return Task.FromResult(receipt);
+    }
+
+    public override Task<IReadOnlyList<FormalDecision>> GetAuthorizedDecisionsAsync(int number, string? author, CancellationToken ct = default)
+    {
+        var decisions = _prStore.ReviewReceipts.Where(pair => pair.Key.Number == number).Select(pair => pair.Value)
+            .Select(review => new FormalDecision(review.Reviewer, review.HeadSha,
+                review.Verdict == nameof(ReviewerVerdict.Approve) ? PullRequestReviewState.Approved : PullRequestReviewState.ChangesRequested,
+                true, review.Round, review.Summary, review.Url)).ToList();
+        return Task.FromResult<IReadOnlyList<FormalDecision>>(decisions);
+    }
+
+    public override Task<ProtectionReviewDecision> GetProtectionReviewDecisionAsync(int number, string head, CancellationToken ct = default)
+        => Task.FromResult(ProtectionReviewDecision.NotRequired);
+
+    public override Task<ReviewObservationBoundary> GetReviewObservationTimeAsync(int number, string head, CancellationToken ct = default)
+        => Task.FromResult(new ReviewObservationBoundary(DateTimeOffset.UtcNow, 1, number));
+
+    public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
+        => Task.FromResult(new MergeRequirements("CLEAN", []));
+
+    public override Task<IReadOnlyList<ReviewConversation>> GetReviewConversationInputsAsync(
+        IReadOnlyList<ReviewConversation> observations, string head, CancellationToken ct = default)
+        => Task.FromResult(observations);
+
+    public override Task<IReadOnlyDictionary<string, string>> ResolveReviewedConversationsAsync(int number, ReviewDraft draft, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>());
+
+    public override Task<bool> HasHumanReviewLabelAsync(int number, CancellationToken ct = default)
+        => Task.FromResult(_prStore.HumanReviewLabels.ContainsKey(number));
+
+    public override Task SetHumanReviewLabelAsync(int number, bool required, CancellationToken ct = default)
+    {
+        if (required) _prStore.HumanReviewLabels.TryAdd(number, true);
+        else _prStore.HumanReviewLabels.TryRemove(number, out _);
+        return Task.CompletedTask;
+    }
+
+    public override Task<string> GetReviewReworkContextAsync(int number, IReadOnlyList<FormalDecision> requests, CancellationToken ct = default)
+        => Task.FromResult(string.Join("\n", requests.Select(request => request.Body)));
+
+    public override Task<LegacyReviewHistoryPage> ReadReviewHistoryAsync(int prNumber, CancellationToken ct) => ReadLegacyReviewHistoryAsync(prNumber, ct);
+
+    public override Task<LegacyReviewHistoryPage> ReadLegacyReviewHistoryAsync(int prNumber, CancellationToken ct)
+        => Task.FromResult(new LegacyReviewHistoryPage([], false, []));
+
+    public override Task<ReviewCodeExcerpt?> ReadReviewExcerptAsync(string sha, string path, int first, int last, CancellationToken ct)
+        => Task.FromResult<ReviewCodeExcerpt?>(null);
     private readonly LocalPrStore _prStore;
     private readonly string _localRemotePath;
 
@@ -92,14 +148,21 @@ public sealed class LocalGitHubService : GitHubService
         return _prStore.CreatePr(title, body, headBranch, baseBranch, sha);
     }
 
-    public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+    public override async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
+        => (await TryMergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha)).Merged;
+
+    public override Task<PullRequestMergeAttempt> TryMergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
     {
         // P4 e2e-harness C2: when the PRWatcher reaches the
         // GreenAndApproved verdict, the orchestrator's
         // CommitPushPrExecutor merges the PR. We record the
         // merge in the PR's state so the harness can assert.
+        if (expectedHeadSha is not null
+            && (!_prStore.PrInfo.TryGetValue(prNumber, out var info)
+                || _prStore.GetBranchSha(info.HeadBranch) != expectedHeadSha))
+            return Task.FromResult(new PullRequestMergeAttempt(false, "The PR head changed."));
         _prStore.MarkMerged(prNumber);
-        return Task.FromResult(true);
+        return Task.FromResult(new PullRequestMergeAttempt(true));
     }
 
     public override Task<PullRequest> ClosePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
@@ -204,11 +267,13 @@ public sealed class LocalGitHubService : GitHubService
 /// </summary>
 public sealed class LocalPrStore
 {
+    internal ConcurrentDictionary<(int Number, string Marker), PublishedReview> ReviewReceipts { get; } = new();
+    internal ConcurrentDictionary<int, bool> HumanReviewLabels { get; } = new();
     private readonly ConcurrentDictionary<int, PullRequest> _prs = new();
     private readonly ConcurrentDictionary<string, string> _branchShas = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> _branchShaWaiters = new();
     private readonly ConcurrentDictionary<string, CommitState> _commitStates = new();
-    private readonly ConcurrentDictionary<int, bool> _mergedFlags = new();
+    private readonly ConcurrentDictionary<int, (string HeadSha, DateTimeOffset MergedAt)> _merges = new();
     private int _nextPrNumber = 1;
 
     public ICollection<PullRequest> AllPrs => _prs.Values;
@@ -243,7 +308,10 @@ public sealed class LocalPrStore
     /// </summary>
     public void MarkMerged(int prNumber)
     {
-        _mergedFlags[prNumber] = true;
+        if (!PrInfo.TryGetValue(prNumber, out var info))
+            throw new InvalidOperationException($"PR #{prNumber} not found");
+        var head = GetBranchSha(info.HeadBranch) ?? info.HeadSha;
+        _merges.TryAdd(prNumber, (head, DateTimeOffset.UtcNow));
     }
 
     /// <summary>
@@ -251,7 +319,7 @@ public sealed class LocalPrStore
     /// <see cref="LocalGitHubService.MergePullRequestAsync"/>.
     /// </summary>
     public bool WasMerged(int prNumber)
-        => _mergedFlags.TryGetValue(prNumber, out var v) && v;
+        => _merges.ContainsKey(prNumber);
 
     public void RegisterPushedBranch(string branch, string sha)
     {
@@ -300,7 +368,24 @@ public sealed class LocalPrStore
 
     public PullRequest GetPr(int number)
     {
-        if (!_prs.TryGetValue(number, out var pr)) throw new InvalidOperationException($"PR #{number} not found");
+        if (!_prs.ContainsKey(number) || !PrInfo.TryGetValue(number, out var info))
+            throw new InvalidOperationException($"PR #{number} not found");
+        var merged = _merges.TryGetValue(number, out var merge);
+        var head = merged ? merge.HeadSha : GetBranchSha(info.HeadBranch) ?? info.HeadSha;
+        // Octokit models have nonpublic setters. Populate a fresh fake API response;
+        // previously the side-channel merge flag never appeared in this observation.
+        var pr = new PullRequest(number);
+        typeof(PullRequest).GetProperty(nameof(PullRequest.Title))!.SetValue(pr, info.Title);
+        typeof(PullRequest).GetProperty(nameof(PullRequest.Body))!.SetValue(pr, info.Body);
+        typeof(PullRequest).GetProperty(nameof(PullRequest.Head))!.SetValue(pr,
+            new GitReference(null!, null!, null!, info.HeadBranch, head, null!, null!));
+        typeof(PullRequest).GetProperty(nameof(PullRequest.Base))!.SetValue(pr,
+            new GitReference(null!, null!, null!, info.BaseBranch, GetBranchSha(info.BaseBranch) ?? "", null!, null!));
+        if (merged)
+        {
+            typeof(PullRequest).GetProperty(nameof(PullRequest.MergedAt))!.SetValue(pr, merge.MergedAt);
+            typeof(PullRequest).GetProperty(nameof(PullRequest.MergeCommitSha))!.SetValue(pr, merge.HeadSha);
+        }
         return pr;
     }
 }

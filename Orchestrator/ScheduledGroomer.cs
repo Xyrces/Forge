@@ -8,7 +8,7 @@ namespace Forge.Orchestrator;
 /// <summary>
 /// P3.5: scheduled Groomer. Wakes up every <c>Interval</c> and
 /// dispatches the GroomerAgent against any Approved specs that
-/// haven't been groomed recently (or whose last groom failed).
+/// have not been groomed recently. Interrupted or failed attempts require explicit retry.
 /// Each run writes a row to <c>issue_groomer_run</c> with
 /// trigger=<c>scheduled</c>.
 ///
@@ -40,6 +40,8 @@ public sealed class ScheduledGroomer
     private readonly StageGates? _gates;
     private readonly Projects.ProjectContextFactory? _projectContexts;
     private readonly WakeupSignal? _wakeup;
+    private readonly Dictionary<long, PendingFinalization> _pendingFinalizations = [];
+    private sealed record PendingFinalization(GroomerRunStatus Status, string Error, TimeSpan Duration);
 
     /// <summary>Max ad-hoc tasks groomed per tick (LLM cost bound).</summary>
     internal const int MaxTaskGroomsPerTick = 3;
@@ -78,6 +80,8 @@ public sealed class ScheduledGroomer
 
     public async Task RunAsync(CancellationToken ct)
     {
+        // The controller has exclusive ownership; interrupted paid calls require an explicit decision.
+        await _runStore.RecoverInterruptedAsync(ct);
         // Stagger the first tick so we don't fight the dashboard at boot.
         try
         {
@@ -135,10 +139,32 @@ public sealed class ScheduledGroomer
 
     public async Task TickAsync(CancellationToken ct)
     {
+        // A gate pauses generation, not acknowledgement of already-finished work.
+        await FlushFinalizationsAsync(ct);
+        if (_pendingFinalizations.Count != 0) return;
         if (_gates is not null && await _gates.IsHeldAsync(StageGates.Groom, ct))
         {
             _logger.LogInformation("ScheduledGroomer: held by operator gate; skipping tick");
             return;
+        }
+
+        foreach (var queued in await _runStore.ListQueuedAsync(ct))
+        {
+            var queuedSpec = await _specs.GetAsync(queued.SpecId, ct);
+            if (queuedSpec is null)
+            {
+                await _runStore.FinishAsync(queued.Id, GroomerRunStatus.Failed, 0, 0, "Specification no longer exists.", TimeSpan.Zero, ct);
+                continue;
+            }
+            try
+            {
+                await RunOneAsync(queuedSpec, queued.Trigger, ct, queued);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Queued grooming run {RunId} could not prepare its repository; it remains unclaimed", queued.Id);
+            }
+            if (_pendingFinalizations.Count != 0) return;
         }
 
         IReadOnlyList<SpecRecord> candidates;
@@ -146,7 +172,7 @@ public sealed class ScheduledGroomer
         {
             // P2.a / P2.b: pull all specs and filter in C#. The
             // candidate set is the "ready to groom" statuses:
-            // Designed (Designer approved), AssetReady, Approved
+            // AssetReady (art completed), Approved
             // (operator fast-path). Groomed is deliberately NOT
             // auto-groomed: grooming appends stories/tasks, so a
             // terminal spec in the candidate set gets re-decomposed
@@ -155,9 +181,7 @@ public sealed class ScheduledGroomer
             // Intentional re-decomposition goes through the manual
             // endpoint with ?force=true.
             var all = await _specs.ListForPipelineSweepAsync(status: null, ct);
-            candidates = all.Where(s => s.Status is SpecStatus.Designed
-                or SpecStatus.AssetReady
-                or SpecStatus.Approved).ToList();
+            candidates = all.Where(s => SpecActions.CanStartGrooming(s.Status)).ToList();
         }
         catch (Exception ex)
         {
@@ -171,6 +195,7 @@ public sealed class ScheduledGroomer
             try
             {
                 await RunOneAsync(spec, GroomerTriggerKind.Scheduled, ct);
+                if (_pendingFinalizations.Count != 0) return;
             }
             catch (Exception ex)
             {
@@ -258,7 +283,9 @@ public sealed class ScheduledGroomer
             string? outcome;
             try
             {
-                var groomer = _groomerFactory.Create(projectId: projectId);
+                var groomingProjectId = projectId ?? (issues as IssueStore)?.ProjectId;
+                await _groomerFactory.RefreshContextAsync(groomingProjectId, ct);
+                var groomer = _groomerFactory.Create(projectId: groomingProjectId);
                 outcome = await groomer.GroomTaskAsync(task.Id, ct);
                 _logger.LogInformation("ScheduledGroomer: ad-hoc task {Id} groom outcome={Outcome}", task.Id, outcome ?? "no-decision");
             }
@@ -284,7 +311,7 @@ public sealed class ScheduledGroomer
 
     /// <summary>
     /// Heuristic: groom a spec at most every <c>Interval</c>, or
-    /// immediately if the last run failed. Cheap query: <c>SELECT
+    /// only after an explicit retry for failed/uncertain runs. Cheap query: <c>SELECT
     /// ts FROM issue_groomer_run WHERE spec_id = $id ORDER BY ts
     /// DESC LIMIT 1</c>.
     /// </summary>
@@ -293,13 +320,22 @@ public sealed class ScheduledGroomer
         var recent = await _runStore.ListAsync(specId: spec.Id, limit: 1, ct);
         if (recent.Count == 0) return true;
         var last = recent[0];
-        if (last.Status == GroomerRunStatus.Failed) return true;
+        if (last.Status is GroomerRunStatus.Failed or GroomerRunStatus.NeedsReview
+            or GroomerRunStatus.Started or GroomerRunStatus.Queued) return false;
         return DateTime.UtcNow - last.Ts >= _interval;
     }
 
-    private async Task RunOneAsync(SpecRecord spec, GroomerTriggerKind trigger, CancellationToken ct)
+    private async Task RunOneAsync(SpecRecord spec, GroomerTriggerKind trigger, CancellationToken ct, IssueGroomerRun? queued = null)
     {
-        var run = await _runStore.StartAsync(spec.Id, trigger, ct);
+        await _groomerFactory.RefreshContextAsync(spec.ProjectId, ct);
+        IssueGroomerRun? run;
+        if (queued is not null)
+        {
+            if (!await _runStore.TryClaimQueuedAsync(queued.Id, ct)) return;
+            run = queued;
+        }
+        else run = await _runStore.TryStartScheduledAsync(spec.Id, ct);
+        if (run is null) return;
         var startedAt = DateTime.UtcNow;
         _logger.LogInformation("ScheduledGroomer: starting run {RunId} for spec {SpecId} (trigger={Trigger})",
             run.Id, spec.Id, trigger);
@@ -307,7 +343,10 @@ public sealed class ScheduledGroomer
         try
         {
             var groomer = _groomerFactory.Create(projectId: spec.ProjectId);
-            var result = await groomer.GroomAsync(spec.Id, ct);
+            if (!SpecActions.CanStartGrooming(spec.Status) && spec.Status != SpecStatus.Groomed
+                && !(trigger == GroomerTriggerKind.Retry && spec.Status == SpecStatus.Grooming))
+                throw new InvalidOperationException("Specification state changed before the queued grooming run.");
+            var result = await groomer.GroomAsync(spec.Id, ct, resumeExisting: trigger == GroomerTriggerKind.Retry);
             var duration = DateTime.UtcNow - startedAt;
             await _runStore.FinishAsync(
                 run.Id, GroomerRunStatus.Succeeded,
@@ -322,13 +361,32 @@ public sealed class ScheduledGroomer
         catch (Exception ex)
         {
             var duration = DateTime.UtcNow - startedAt;
-            await _runStore.FinishAsync(
-                run.Id, GroomerRunStatus.Failed,
-                storiesProduced: 0, tasksProduced: 0,
-                error: $"{ex.GetType().Name}: {ex.Message}",
-                duration: duration,
-                ct: ct);
+            _pendingFinalizations[run.Id] = new(
+                ex is OperationCanceledException ? GroomerRunStatus.NeedsReview : GroomerRunStatus.Failed,
+                $"{ex.GetType().Name}: {ex.Message}", duration);
+            await FlushFinalizationsAsync(CancellationToken.None);
             _logger.LogWarning(ex, "ScheduledGroomer: spec {SpecId} failed in {Ms}ms", spec.Id, duration.TotalMilliseconds);
         }
     }
+
+    private async Task FlushFinalizationsAsync(CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(15));
+        foreach (var (runId, pending) in _pendingFinalizations.ToArray())
+        {
+            try
+            {
+                await _runStore.FinishAsync(runId, pending.Status, 0, 0,
+                    pending.Error, pending.Duration, deadline.Token);
+                _pendingFinalizations.Remove(runId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Grooming run {RunId} finished but its acknowledgement is pending; next tick retries database persistence only", runId);
+                return;
+            }
+        }
+    }
+
 }

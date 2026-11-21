@@ -1,5 +1,26 @@
 namespace Forge.Core.Messaging;
 
+/// <summary>Committed queue status, separate from lifecycle observations that may precede it.</summary>
+public sealed record TaskStatusChanged : IForgeEvent
+{
+    public required string MessageId { get; init; }
+    public required string ProjectId { get; init; }
+    public required string TaskId { get; init; }
+    public required IssueStatus FromStatus { get; init; }
+    public required IssueStatus ToStatus { get; init; }
+    public DateTimeOffset ChangedAt { get; init; }
+}
+
+/// <summary>A committed completion outcome changed planning eligibility; consumers re-read receipts.</summary>
+public sealed record SprintOutcomeChanged : IForgeEvent
+{
+    public required string MessageId { get; init; }
+    public required string ProjectId { get; init; }
+    public required string SprintId { get; init; }
+    public required string CompletionId { get; init; }
+    public required string Outcome { get; init; }
+}
+
 /// <summary>
 /// Internal coordination event contracts. Pure records, no dependencies.
 /// Messages are HINTS, not truth: every consumer re-reads DB state and
@@ -197,7 +218,7 @@ public enum SweepKind
 }
 
 /// <summary>
-/// Periodic backstop tick (15m). Triggered work stays correct if every
+/// Periodic truth tick (watch: 1m; planning backstop: 15m). Work stays correct if every
 /// hint event is lost — ticks re-derive everything from DB/GitHub truth.
 /// </summary>
 public sealed record SweepTick : IForgeEvent

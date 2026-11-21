@@ -45,11 +45,39 @@ public sealed record DeploymentOptions
     public string? PublishProject { get; set; }
     public string? ReleasesRoot { get; set; }
     public string? CurrentLinkPath { get; set; }
+
+    // Operator-reviewed CI receipt catalog. Never resolve a mutable tag at deployment time.
+    public Dictionary<string, string> KubernetesImages { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    // Optional operator-managed, append-only source SHA -> digest ConfigMap; read per approval/reconciliation.
+    public string? KubernetesImageCatalog { get; set; }
+    public string KubernetesNamespace { get; set; } = "forge";
+    public string? KubernetesDatasetId { get; set; }
+    public bool RoutineEnabled { get; set; }
+    public string RoutineWorkflow { get; set; } = "controller-image.yml";
+    public string RoutineValidationWorkflow { get; set; } = "ci.yml";
+    public string RoutineImageRepository { get; set; } = "ghcr.io/xyrces/forge";
+
+    // Physical bindings are host-controlled. Dashboard policy edits may select these
+    // bindings but cannot introduce arbitrary cluster destinations.
+    public string? SprintEnvironment { get; set; }
+    public Dictionary<string, DeploymentEnvironmentOptions> Environments { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
+
+public sealed record DeploymentEnvironmentOptions
+{
+    public string DisplayName { get; set; } = string.Empty;
+    public string KubernetesNamespace { get; set; } = string.Empty;
+    public string KubernetesDatasetId { get; set; } = string.Empty;
+    public List<string> PromoteTo { get; set; } = [];
+    public bool RequireApproval { get; set; } = true;
+}
+
+public sealed record DeploymentTargetSnapshot(string Name, string DisplayName, string KubernetesNamespace, string KubernetesDatasetId);
 
 public enum DeploymentKind
 {
     None,
     Script,
     SelfHostedSystemdService,
+    Kubernetes,
 }

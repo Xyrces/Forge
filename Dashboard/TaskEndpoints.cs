@@ -16,7 +16,7 @@ namespace Forge.Dashboard;
 /// </summary>
 public static class TaskEndpoints
 {
-    public sealed record TaskEventDto(string Kind, DateTime At, string? Detail);
+    public sealed record TaskEventDto(string Kind, DateTime At, string? Detail, string? Actor = null, long? Id = null);
 
     public sealed record InProgressTaskDto(
         string Id,
@@ -46,19 +46,71 @@ public static class TaskEndpoints
         AgentRunStore? runs = null,
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
         Forge.Core.TaskStateMachine? lifecycle = null,
-        Func<string, GitHubService?>? gitHubForProject = null)
+        Func<string, GitHubService?>? gitHubForProject = null,
+        Func<string, string, CancellationToken, Task<bool>>? hasActiveWorker = null,
+        Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? workerHistory = null)
     {
+        TaskRegroomEndpoints.MapTaskRegroomEndpoints(app, issues, projectContexts, logger);
+        TaskReviewHistoryEndpoints.Map(app, issues, projectContexts, gitHubForProject);
+        app.MapGet("/api/tasks/{id}/workers", async (string id, string projectId, CancellationToken ct) =>
+        {
+            var store = projectContexts?.Find(projectId)?.Issues ?? (issues is IssueStore primary && primary.ProjectId == projectId ? primary : null);
+            if (store is null || await store.GetAsync(id, ct) is null) return Results.NotFound();
+            if (workerHistory is null) return Results.Json(new { available = false, attempts = Array.Empty<object>() });
+            return Results.Json(new { available = true, attempts = await workerHistory(projectId, id, ct), limit = 100 });
+        });
+        app.MapGet("/api/tasks/{id}/history", async (string id, string? projectId, string? cursor, CancellationToken ct) =>
+        {
+            var store = projectId is not null && projectContexts is not null ? projectContexts.Find(projectId)?.Issues : issues;
+            if (store is null || await store.GetAsync(id, ct) is null) return Results.NotFound();
+            if (store is not IssueStore concrete) return Results.StatusCode(503);
+            try
+            {
+                var page = await new TaskHistoryReadStore(concrete.Db).ReadAsync(projectId ?? concrete.ProjectId ?? "primary", id, cursor, ct);
+                return Results.Json(new { events = page.Events.Select(e => new TaskEventDto(e.Kind, e.Timestamp, e.Detail, e.Actor, e.Id)), page.NextCursor });
+            }
+            catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+        });
+        app.MapGet("/api/tasks/list", async (string? projectId, string? view, string? search, string? cursor, CancellationToken ct) =>
+        {
+            var store = issues;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var context = projectContexts.Find(projectId);
+                if (context is null) return Results.NotFound(new { error = "project not found" });
+                store = context.Issues;
+            }
+            var records = (await store.ListAsync(new IssueFilter(), ct))
+                .Where(t => t.Type != AgentTaskTypes.PrWatch && t.Type is not ("epic" or "story"))
+                .Where(t => view switch
+                {
+                    "history" => t.Status is IssueStatus.Completed or IssueStatus.Closed,
+                    "attention" => t.Status is IssueStatus.Failed or IssueStatus.Blocked || TaskSituation.Describe(t).Label == "Waiting for human review",
+                    _ => t.Status is IssueStatus.Pending or IssueStatus.InProgress
+                })
+                .Where(t => string.IsNullOrWhiteSpace(search) || t.Title.Contains(search, StringComparison.OrdinalIgnoreCase)
+                    || t.Id.Contains(search, StringComparison.OrdinalIgnoreCase) || t.GetMetadata("prNumber") == search.TrimStart('#'))
+                .OrderByDescending(t => t.CreatedAt).ThenBy(t => t.Id, StringComparer.Ordinal).ToList();
+            var start = cursor is null ? 0 : records.FindIndex(t => t.Id == cursor) + 1;
+            if (cursor is not null && start == 0) return Results.BadRequest(new { error = "History changed. Refresh the list." });
+            var page = records.Skip(start).Take(50).ToArray();
+            return Results.Json(new { items = page.Select(t => new { t.Id, t.Title, status = t.Status.ToString(), t.Type,
+                prNumber = t.GetMetadata("prNumber"), situation = TaskSituation.Describe(t), t.UpdatedAt }),
+                nextCursor = start + page.Length < records.Count ? page.LastOrDefault()?.Id : null, total = records.Count });
+        });
         // Derived lifecycle state (Phase 1 read-model): what the task
         // is doing + what it's waiting on, projected from the task,
         // its PR-watch, and the live-run registry.
         app.MapGet("/api/tasks/{id}/state", async (string id, string? projectId, CancellationToken ct) =>
         {
             var store = issues;
+            var runStore = runs;
             if (projectId is not null && projectContexts is not null)
             {
                 var ctx = projectContexts.Find(projectId);
                 if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
                 store = ctx.Issues;
+                runStore = new AgentRunStore(((IssueStore)ctx.Issues).Db);
             }
             var task = await store.GetAsync(id, ct);
             if (task is null) return Results.NotFound(new { error = "task not found", id });
@@ -71,8 +123,8 @@ public static class TaskEndpoints
                     string.Equals(w.GetMetadata("taskId"), id, StringComparison.Ordinal)
                     && w.Status is not (IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed));
             }
-            var hasActiveDevRun = runs is not null
-                && (await runs.ListActiveAsync(ct)).Any(r =>
+            var hasActiveDevRun = runStore is not null
+                && (await runStore.ListActiveAsync(ct)).Any(r =>
                     string.Equals(r.TaskId, id, StringComparison.Ordinal)
                     && r.Role is "CoreDev" or "ClientDev");
 
@@ -96,13 +148,14 @@ public static class TaskEndpoints
                 waitingOn = info.WaitingOn,
                 strikes = info.Strikes,
                 maxStrikes = info.MaxStrikes,
+                situation = TaskSituation.Describe(task),
             });
         });
 
         // Single-task drill-down: the full row + parsed metadata +
         // the issue_event audit timeline + sprint membership. Powers
         // the /tasks/{id} page; every list view links here.
-        app.MapGet("/api/tasks/{id}", async (string id, string? projectId, CancellationToken ct) =>
+        app.MapGet("/api/tasks/{id}", async (string id, string? projectId, bool? includeEvents, CancellationToken ct) =>
         {
             var store = issues;
             ISprintStore? sprintStore = sprints;
@@ -115,20 +168,13 @@ public static class TaskEndpoints
             }
             var t = await store.GetAsync(id, ct);
             if (t is null) return Results.NotFound(new { error = "task_not_found", id });
+            await using var reviewMemory = store is IssueStore owner ? new MemoryStore(owner.Db) : null;
+            var nominee = reviewMemory is null ? null : (await new PullRequestReviewPolicy(reviewMemory).GetSettingsAsync(ct)).NominatedHuman;
 
-            var events = await store.ListEventsAsync(t.Id, limit: 100, ct);
-            string? sprintId = null, sprintName = null, sprintStatus = null;
-            if (sprintStore is not null)
-            {
-                foreach (var sp in await sprintStore.ListAsync(activeOnly: false, ct))
-                {
-                    if ((await sprintStore.GetIssueIdsAsync(sp.Id, ct)).Contains(t.Id))
-                    {
-                        sprintId = sp.Id; sprintName = sp.Name; sprintStatus = sp.Status.ToString();
-                        break;
-                    }
-                }
-            }
+            var events = includeEvents == false ? [] : await store.ListEventsAsync(t.Id, limit: 100, ct);
+            var sprint = sprintStore is null ? null : await sprintStore.FindForIssueAsync(t.Id, ct);
+            var plan = t.GetMetadata(Core.Completion.ExistingImplementationEvidence.MetadataKey) is not null && sprint is not null && store is IssueStore concrete
+                ? await new SprintProposalAuditStore(concrete.Db).GetPlanForSprintAsync(sprint.Id, ct) : null;
             return Results.Json(new
             {
                 id = t.Id,
@@ -144,9 +190,13 @@ public static class TaskEndpoints
                 closedAt = t.ClosedAt,
                 dispatchCheckpoint = t.DispatchCheckpoint?.ToString(),
                 recoveryAttempts = t.RecoveryAttempts,
+                situation = TaskSituation.Describe(t, plan, nominee),
+                delivery = TaskDeliveryPresenter.For(t, plan),
+                queueWakeup = DispatchWakeupTiming.Read(t),
                 metadata = TaskEndpoints.ParseMetadata(t.MetadataJson),
-                sprint = sprintId is null ? null : new { id = sprintId, name = sprintName, status = sprintStatus },
-                events = events.Select(e => new TaskEventDto(e.Kind, e.Timestamp, e.Detail)).ToArray(),
+                sprint = sprint is null ? null : new { id = sprint.Id, name = sprint.Name, status = sprint.Status.ToString() },
+                events = events.Select(e => new TaskEventDto(e.Kind, e.Timestamp, e.Detail, e.Actor, e.Id)).ToArray(),
+                historyLimited = events.Count == 100,
             });
         });
 
@@ -274,6 +324,45 @@ public static class TaskEndpoints
                 if (t is null) return Results.NotFound(new { error = "task not found", id });
                 if (t.Status is not (IssueStatus.Failed or IssueStatus.Blocked))
                     return Results.Conflict(new { error = $"only Failed or Blocked tasks can be requeued (status is {t.Status})" });
+
+                if (ReviewIntegrationState.IsBlocked(t))
+                {
+                    if (guideReason is not null || guideContext is not null)
+                        return Results.Conflict(new { error = "Retry review preserves engineering work; use a separate work request for code changes." });
+                    var scope = projectId ?? (store as IssueStore)?.ProjectId;
+                    var pollGate = Forge.Reviewer.PRWatcher.GetPollGate(scope, id);
+                    var reviewGate = Forge.Reviewer.ReviewWorkerAttempt.Gate(scope, id, AgentType.Reviewer);
+                    await pollGate.WaitAsync(ct);
+                    try
+                    {
+                        await reviewGate.WaitAsync(ct);
+                        try
+                        {
+                            var current = await store.GetAsync(id, ct);
+                            if (current is null || !ReviewIntegrationState.IsBlocked(current))
+                                return Results.Conflict(new { error = "Task changed; reload before retrying review." });
+                            var fields = ReviewIntegrationState.RetryMetadata();
+                            fields["prOpenedAt"] = DateTime.UtcNow.ToString("O");
+                            await store.TransitionAsync(id, IssueStatus.InProgress, "Operator requested review reconciliation; engineering work retained", fields, ct);
+                            if (lifecycle is not null)
+                                await lifecycle.ReportAsync(store, (await store.GetAsync(id, ct))!, Forge.Core.TaskEvent.WatchResumed, null, false, ct);
+                        }
+                        finally { reviewGate.Release(); }
+                    }
+                    finally { pollGate.Release(); }
+                    // A lifecycle/status hint may arrive while the locks above are held.
+                    // Wake the actual review-launching watch sweep only AFTER releasing both.
+                    if (store is IssueStore concrete)
+                    {
+                        var now = DateTimeOffset.UtcNow;
+                        await concrete.Events.PublishAsync(new Forge.Core.Messaging.SweepTick
+                        {
+                            MessageId = $"review-retry:{concrete.ProjectId}:{id}:{now:O}",
+                            ProjectId = concrete.ProjectId, Kind = Forge.Core.Messaging.SweepKind.Watch, TickAt = now
+                        }, ct);
+                    }
+                    return Results.Json(new { taskId = id, status = "InProgress", action = "retry-review" });
+                }
 
                 // One atomic transition: Failed -> Pending + clear the
                 // failure bookkeeping so the retry budget starts fresh
@@ -540,6 +629,8 @@ public static class TaskEndpoints
                 if (t is null) return Results.NotFound(new { error = "task not found", id });
                 if (t.Status is not (IssueStatus.Failed or IssueStatus.Blocked or IssueStatus.InProgress))
                     return Results.Conflict(new { error = $"only Failed, Blocked, or InProgress tasks can have strikes reset (status is {t.Status})" });
+                if (ReviewIntegrationState.IsBlocked(t))
+                    return Results.Conflict(new { error = "Use Retry review to reconcile publication without resetting engineering strikes." });
 
                 var resets = int.TryParse(t.GetMetadata("strikeResetCount"), out var n) ? n + 1 : 1;
                 var meta = new Dictionary<string, object>
@@ -609,43 +700,86 @@ public static class TaskEndpoints
             }
         });
 
-        app.MapPost("/api/tasks/{id}/adopt-pr", async (string id, AdoptPrRequest? body, string? projectId, CancellationToken ct) =>
+        app.MapPost("/api/tasks/{id}/adopt-pr", async (string id, AdoptPrRequest? body, string? projectId, HttpContext http, CancellationToken ct) =>
         {
-            // Adopt an orphan PR into the watch loop: any PR opened
-            // outside the pipeline (operator hand-created, external
-            // tool, recovered work) gets a proper pr-watch issue so
-            // the reviewer/CI/merge loop OWNS it — the sanctioned
-            // alternative to hand-merging (operator rule 2026-07-25:
-            // no manual out-of-loop fixes).
-            var store = issues;
-            if (projectId is not null && projectContexts is not null)
-            {
-                var ctx = projectContexts.Find(projectId);
-                if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
-                store = ctx.Issues;
-            }
+            // Explicit operator recovery. The task IS the watch; never create a pr-watch row.
+            var context = projectId is null ? null : projectContexts?.Find(projectId);
+            if (projectId is not null && context is null)
+                return Results.NotFound(new { error = "project not found", projectId });
+            var store = context?.Issues ?? issues;
+            var pid = context?.Options.Id ?? (store as IssueStore)?.ProjectId ?? "";
             try
             {
                 if (body is null || body.PrNumber <= 0 || string.IsNullOrWhiteSpace(body.Branch))
                     return Results.BadRequest(new { error = "prNumber (> 0) and branch are required" });
+                var gh = gitHubForProject?.Invoke(pid);
+                if (gh is null || lifecycle is null)
+                    return Results.Problem(detail: "PR validation and task lifecycle services are required", statusCode: 503);
                 var t = await store.GetAsync(id, ct);
                 if (t is null) return Results.NotFound(new { error = "task not found", id });
+                if (t.Status is not (IssueStatus.Failed or IssueStatus.Blocked))
+                    return Results.Conflict(new { error = "park the task before adopting a PR; only Failed or Blocked work can be adopted" });
+                if ((t.GetMetadata("prNumber") is { Length: > 0 } existingPr && existingPr != body.PrNumber.ToString(System.Globalization.CultureInfo.InvariantCulture)) ||
+                    (t.GetMetadata("branch") is { Length: > 0 } existingBranch && existingBranch != body.Branch) ||
+                    (body.WorktreePath is not null && body.WorktreePath != t.GetMetadata("worktreePath")))
+                    return Results.Conflict(new { error = "adoption cannot rebind an existing PR, branch or worktree path" });
+                var current = Enum.TryParse<TaskLifecycleState>(t.GetMetadata("state"), out var recorded)
+                    ? recorded : TaskStateProjector.Derive(t, null, false, DateTime.UtcNow).State;
+                if (!TaskStateMachine.IsLegal(TaskEvent.OperatorAdoptPr, current, TaskLifecycleState.PROpen))
+                    return Results.Conflict(new { error = "task lifecycle cannot adopt a PR" });
+                var runStore = store is IssueStore concrete ? new AgentRunStore(concrete.Db) : runs;
+                if (runStore is null)
+                    return Results.Problem(detail: "Active-run validation is required", statusCode: 503);
+                if ((hasActiveWorker is not null && await hasActiveWorker(pid, id, ct)) ||
+                    (await runStore.ListActiveAsync(ct)).Any(r => r.TaskId == id && r.Role is "CoreDev" or "ClientDev"))
+                    return Results.Conflict(new { error = "engineering work is still active" });
 
-                var watch = await store.CreateAsync(new NewIssue(
-                    Type: AgentTaskTypes.PrWatch,
-                    Title: $"Watch PR #{body.PrNumber} for {id}",
-                    Description: $"Wait for PR #{body.PrNumber} to be reviewed.",
-                    Metadata: new Dictionary<string, object>
-                    {
-                        ["prNumber"] = body.PrNumber,
-                        ["branch"] = body.Branch,
-                        ["worktreePath"] = body.WorktreePath ?? string.Empty,
-                        ["taskId"] = id,
-                        ["adopted"] = "true",
-                    }), ct);
-                logger.LogInformation("POST /api/tasks/{Id}/adopt-pr: watch {WatchId} created for PR #{Pr}",
-                    id, watch.Id, body.PrNumber);
-                return Results.Json(new { taskId = id, watchId = watch.Id, prNumber = body.PrNumber });
+                var pr = await gh.GetPullRequestAsync(body.PrNumber, ct);
+                var repository = $"{gh.Owner}/{gh.Repo}";
+                if (context is not null && (!Uri.TryCreate(context.Options.RepoUrl, UriKind.Absolute, out var repoUri) ||
+                    !string.Equals(repoUri.AbsolutePath.Trim('/').Replace(".git", "", StringComparison.Ordinal), repository, StringComparison.OrdinalIgnoreCase)))
+                    return Results.Conflict(new { error = "GitHub service does not match the task project" });
+                if (pr.Number != body.PrNumber || pr.State.Value != Octokit.ItemState.Open || pr.Merged ||
+                    !string.Equals(pr.Base?.Repository?.FullName, repository, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(pr.Head?.Repository?.FullName, repository, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(pr.Head?.Ref, body.Branch, StringComparison.Ordinal) ||
+                    string.IsNullOrWhiteSpace(pr.Head?.Sha) ||
+                    (context is not null && !string.Equals(pr.Base?.Ref, context.Options.DefaultBranch, StringComparison.Ordinal)) ||
+                    (body.ExpectedHeadSha is not null && !string.Equals(pr.Head?.Sha, body.ExpectedHeadSha, StringComparison.OrdinalIgnoreCase)))
+                    return Results.Conflict(new { error = "PR must be open, unmerged, and match the project, branch, base and expected head" });
+
+                // Refuse a changed task after the external lookup rather than revive a newly completed run.
+                var fresh = await store.GetAsync(id, ct);
+                if (fresh is null || fresh != t)
+                    return Results.Conflict(new { error = "task changed during PR validation; retry adoption" });
+                var now = DateTime.UtcNow.ToString("O");
+                var metadata = new Dictionary<string, object>
+                {
+                    ["prNumber"] = pr.Number, ["branch"] = pr.Head!.Ref,
+                    ["prUrl"] = pr.HtmlUrl, ["prOpenedAt"] = now,
+                    ["operatorAdoptedAt"] = now, ["operatorAdoptedBy"] = http.User.Identity?.Name ?? "operator",
+                    ["operatorAdoptedFromStatus"] = t.Status.ToString(), ["operatorAdoptedFromState"] = current.ToString(),
+                    ["operatorAdoptedHeadSha"] = pr.Head.Sha, ["branchSha"] = pr.Head.Sha,
+                    ["clearanceAction"] = "operator-adopt-pr", ["clearanceActionAt"] = now,
+                };
+                // Approval belongs to a PR at an exact head. Archive mismatched evidence before
+                // clearing its live fields, so a newly attached orphan cannot inherit approval.
+                if (t.GetMetadata("prNumber") != pr.Number.ToString(System.Globalization.CultureInfo.InvariantCulture) ||
+                    !string.Equals(t.GetMetadata("reviewSha"), pr.Head.Sha, StringComparison.OrdinalIgnoreCase))
+                {
+                    var reviewKeys = new[] { "reviewSha", "reviewVerdict", "reviewNotes", "reviewRound", "reviewStartedAt" };
+                    metadata["operatorAdoptedPriorReview"] = JsonSerializer.Serialize(reviewKeys.ToDictionary(key => key, t.GetMetadata));
+                    foreach (var key in reviewKeys) metadata[key] = null!;
+                }
+                if (body.WorktreePath is not null) metadata["worktreePath"] = body.WorktreePath;
+                // Merge metadata only: exact-head review, strikes and historical failure/violation evidence survive.
+                // Keep Failed/Blocked until the observed PR and legal lifecycle record have been persisted.
+                await lifecycle.ReportAsync(store, t, TaskEvent.OperatorAdoptPr, null, false, ct, metadata);
+                await store.AddEventAsync(id, "operator.adopt_pr", JsonSerializer.Serialize(metadata), ct);
+                await store.SetCheckpointAsync(id, DispatchCheckpoint.PrOpened, ct);
+                await store.TransitionAsync(id, IssueStatus.InProgress, error: null, ct: ct);
+                logger.LogInformation("Operator adopted PR #{Pr} on task {TaskId} in project {ProjectId}", pr.Number, id, pid);
+                return Results.Json(new { taskId = id, prNumber = pr.Number, headSha = pr.Head.Sha });
             }
             catch (Exception ex)
             {
@@ -681,7 +815,7 @@ public static class TaskEndpoints
         });
     }
 
-    public sealed record AdoptPrRequest(int PrNumber, string Branch, string? WorktreePath);
+    public sealed record AdoptPrRequest(int PrNumber, string Branch, string? WorktreePath, string? ExpectedHeadSha = null);
 
     /// <summary>Body for POST /api/tasks/{id}/close: the operator's
     /// reason (audit trail) and whether to also close the linked PR

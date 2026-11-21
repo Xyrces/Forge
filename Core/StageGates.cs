@@ -21,7 +21,8 @@ public sealed class StageGates
     public const string Groom = "groom";
     public const string Sprint = "sprint";
     public const string Merge = "merge";
-    public static readonly string[] All = { Design, Groom, Sprint, Merge };
+    public const string Deploy = "deploy";
+    public static readonly string[] All = { Design, Groom, Sprint, Merge, Deploy };
 
     private const string HoldValue = "hold";
     private const string OpenValue = "open";
@@ -37,7 +38,7 @@ public sealed class StageGates
 
     public static bool IsKnown(string stage) => All.Contains(stage, StringComparer.OrdinalIgnoreCase);
 
-    private static string Key(string stage) => $"gate/{stage}";
+    private static string Key(string stage) => $"gate/{stage.ToLowerInvariant()}";
 
     public async Task<bool> IsHeldAsync(string stage, CancellationToken ct = default)
     {
@@ -46,7 +47,7 @@ public sealed class StageGates
         // DISABLED — holds on it have no effect. The built-in default
         // attaches every gate at its current step, so default
         // behavior is unchanged.
-        if (_workflow is not null)
+        if (_workflow is not null && stage != Deploy)
         {
             var definition = await _workflow.ResolveAsync(ct);
             var attached = definition.Steps.Any(s => s.Enabled
@@ -56,16 +57,27 @@ public sealed class StageGates
                 return false;
             }
         }
-        return string.Equals(
-            (await _memory.RecallAsync(Key(stage), ct)).FirstOrDefault()?.Body,
-            HoldValue, StringComparison.Ordinal);
+        if (string.Equals(stage, Merge, StringComparison.OrdinalIgnoreCase)
+            && await _memory.GetAsync(Control.DeploymentMergeFence.OperatorKey, ct) is { } intent)
+            return intent.Body != OpenValue;
+        return (await _memory.GetAsync(Key(stage), ct))?.Body == HoldValue;
     }
 
     public async Task HoldAsync(string stage, CancellationToken ct = default)
-        => await _memory.RememberAsync(Key(stage), HoldValue, ttlDays: null, ct);
+    {
+        if (string.Equals(stage, Merge, StringComparison.OrdinalIgnoreCase))
+            await _memory.WriteMergeGateAsync(true, null, ct);
+        else
+            await _memory.RememberAsync(Key(stage), HoldValue, ttlDays: null, ct);
+    }
 
     public async Task ReleaseAsync(string stage, CancellationToken ct = default)
-        => await _memory.RememberAsync(Key(stage), OpenValue, ttlDays: null, ct);
+    {
+        if (string.Equals(stage, Merge, StringComparison.OrdinalIgnoreCase))
+            await _memory.WriteMergeGateAsync(false, null, ct);
+        else
+            await _memory.RememberAsync(Key(stage), OpenValue, ttlDays: null, ct);
+    }
 
     public async Task<IReadOnlyDictionary<string, bool>> SnapshotAsync(CancellationToken ct = default)
     {

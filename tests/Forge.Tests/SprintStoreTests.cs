@@ -30,23 +30,23 @@ public class SprintStoreTests : IDisposable
     {
         var now = DateTime.UtcNow;
         await _sprints.CreateAsync(new NewSprint("S1", "g1", now, now.AddDays(7), SprintStatus.Active));
-        var second = await _sprints.CreateAsync(new NewSprint("S2", "g2", now, now.AddDays(7), SprintStatus.Active));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _sprints.CreateAsync(new NewSprint("S2", "g2", now, now.AddDays(7), SprintStatus.Active)));
         var active = await _sprints.ListAsync(activeOnly: true);
         Assert.Single(active);
-        Assert.Equal(second.Id, active[0].Id);
+        Assert.Contains("S1", active[0].Name);
     }
 
     [Fact]
-    public async Task SetActive_ArchivesPrevious()
+    public async Task SetActive_RejectsDisplacingPrevious()
     {
         var now = DateTime.UtcNow;
         var s1 = await _sprints.CreateAsync(new NewSprint("S1", "g1", now, now.AddDays(7), SprintStatus.Active));
         var s2 = await _sprints.CreateAsync(new NewSprint("S2", "g2", now, now.AddDays(7), SprintStatus.Completed));
-        await _sprints.SetActiveAsync(s2.Id);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _sprints.SetActiveAsync(s2.Id));
         var active = await _sprints.GetActiveAsync();
-        Assert.Equal(s2.Id, active!.Id);
+        Assert.Equal(s1.Id, active!.Id);
         var s1After = await _sprints.GetAsync(s1.Id);
-        Assert.Equal(SprintStatus.Archived, s1After!.Status);
+        Assert.Equal(SprintStatus.Active, s1After!.Status);
     }
 
     [Fact]
@@ -81,8 +81,8 @@ public class SprintStoreTests : IDisposable
     {
         var now = DateTime.UtcNow;
         var first = await _sprints.CreateAsync(new NewSprint("Bootstrap, wiring & visibility", "g", now, now.AddDays(7), SprintStatus.Active));
-        var second = await _sprints.CreateAsync(new NewSprint("Construction loop", "g", now, now.AddDays(7), SprintStatus.Active));
-        var alreadyNumbered = await _sprints.CreateAsync(new NewSprint("Sprint 9: custom", "g", now, now.AddDays(7), SprintStatus.Active));
+        var second = await _sprints.CreateAsync(new NewSprint("Construction loop", "g", now, now.AddDays(7), SprintStatus.Completed));
+        var alreadyNumbered = await _sprints.CreateAsync(new NewSprint("Sprint 9: custom", "g", now, now.AddDays(7), SprintStatus.Completed));
 
         Assert.Equal("Sprint 1: Bootstrap, wiring & visibility", first.Name);
         Assert.Equal("Sprint 2: Construction loop", second.Name);

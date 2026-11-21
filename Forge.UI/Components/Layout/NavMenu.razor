@@ -2,42 +2,46 @@
 @inject IDispatcher Dispatcher
 
 <section class="nav-group">
-    <NavLink class="nav-item" href="/now" Match="NavLinkMatch.All"><span class="nav-item__icon">●</span><span>Now</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/now" Match="NavLinkMatch.All"><span class="nav-item__icon">●</span><span>Now</span></NavLink>
 </section>
 
 <section class="nav-group">
     <div class="nav-group__label">IDEATION</div>
-    <NavLink class="nav-item" href="/intake"><span class="nav-item__icon">◆</span><span>Intake</span></NavLink>
-    <NavLink class="nav-item" href="/vision"><span class="nav-item__icon">◇</span><span>Vision Board</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/intake"><span class="nav-item__icon">◆</span><span>Intake</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/vision"><span class="nav-item__icon">◇</span><span>Vision Board</span></NavLink>
 </section>
 
 <section class="nav-group">
     <div class="nav-group__label">PRODUCT</div>
-    <NavLink class="nav-item" href="/specs"><span class="nav-item__icon">▤</span><span>Specs</span></NavLink>
-    <NavLink class="nav-item" href="/designs"><span class="nav-item__icon">▦</span><span>Designs</span></NavLink>
-    <NavLink class="nav-item" href="/art"><span class="nav-item__icon">◈</span><span>Art</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/specs"><span class="nav-item__icon">▤</span><span>Specs</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/designs"><span class="nav-item__icon">▦</span><span>Designs</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/art"><span class="nav-item__icon">◈</span><span>Art</span></NavLink>
 </section>
 
 <section class="nav-group">
     <div class="nav-group__label">EXECUTION</div>
-    <NavLink class="nav-item" href="/backlog"><span class="nav-item__icon">▢</span><span>Backlog</span></NavLink>
-    <NavLink class="nav-item" href="/sprints"><span class="nav-item__icon">▣</span><span>Sprints</span></NavLink>
-    <NavLink class="nav-item" href="/tasks"><span class="nav-item__icon">▥</span><span>Tasks</span></NavLink>
-    <NavLink class="nav-item" href="/flow"><span class="nav-item__icon">⇄</span><span>Flow</span></NavLink>
-    <NavLink class="nav-item" href="/runs"><span class="nav-item__icon">▶</span><span>Runs</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/backlog"><span class="nav-item__icon">▢</span><span>Backlog</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/sprints"><span class="nav-item__icon">▣</span><span>Sprints</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/tasks"><span class="nav-item__icon">▥</span><span>Active tasks</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/flow"><span class="nav-item__icon">⇄</span><span>Flow</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/runs"><span class="nav-item__icon">▶</span><span>Runs</span></NavLink>
 </section>
 
 <section class="nav-group">
     <div class="nav-group__label">OPS</div>
-    <NavLink class="nav-item" href="/projects"><span class="nav-item__icon">◉</span><span>Projects</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/projects"><span class="nav-item__icon">◉</span><span>Projects</span></NavLink>
     @if (AppShellState.Value.CurrentProjectId is not null)
     {
-        <NavLink class="nav-item" href="@($"/projects/{AppShellState.Value.CurrentProjectId}/secrets")"><span class="nav-item__icon">⚿</span><span>Secrets</span></NavLink>
+        <NavLink @onclick="OnNavigate" class="nav-item" href="@($"/projects/{AppShellState.Value.CurrentProjectId}/secrets")"><span class="nav-item__icon">⚿</span><span>Secrets</span></NavLink>
     }
-    <NavLink class="nav-item" href="/board"><span class="nav-item__icon">▤</span><span>Board</span></NavLink>
-    <NavLink class="nav-item" href="/deployments"><span class="nav-item__icon">⇪</span><span>Deployments</span></NavLink>
-    <NavLink class="nav-item" href="/agents"><span class="nav-item__icon">◉</span><span>Agents</span></NavLink>
-    <NavLink class="nav-item" href="/skills"><span class="nav-item__icon">◐</span><span>Skills</span></NavLink>
-    <NavLink class="nav-item" href="/ops/gates"><span class="nav-item__icon">⊞</span><span>Gates</span></NavLink>
-    <NavLink class="nav-item" href="/triage"><span class="nav-item__icon">✚</span><span>Triage</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/board"><span class="nav-item__icon">▤</span><span>Board</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/deployments"><span class="nav-item__icon">⇪</span><span>Deployments</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/agents"><span class="nav-item__icon">◉</span><span>Agents</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/skills"><span class="nav-item__icon">◐</span><span>Skills</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/ops/gates"><span class="nav-item__icon">⊞</span><span>Run quality checks</span></NavLink>
+    <NavLink @onclick="OnNavigate" class="nav-item" href="/triage"><span class="nav-item__icon">✚</span><span>Triage</span></NavLink>
 </section>
+
+@code {
+    [Parameter] public EventCallback OnNavigate { get; set; }
+}

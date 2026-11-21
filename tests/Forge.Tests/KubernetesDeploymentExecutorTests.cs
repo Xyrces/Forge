@@ -1,0 +1,212 @@
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Forge.Configuration;
+using Forge.Deploy;
+using Xunit;
+
+namespace Forge.Tests;
+
+public sealed class KubernetesDeploymentExecutorTests
+{
+    private static readonly string Sha = new('a', 40);
+    private static readonly string Image = "registry/forge@sha256:" + new string('b', 64);
+    private static ProjectOptions Project() => new() { Id = "forge", Deployment = new() {
+        Kind = DeploymentKind.Kubernetes, KubernetesDatasetId = "6da15971-6ce5-45ef-9f9f-51e1e71c0597",
+        KubernetesImageCatalog = "forge-image-catalog",
+        KubernetesImages = new() { [Sha] = Image } } };
+    private static DeploymentCandidate Candidate(DeploymentStatus status = DeploymentStatus.BuildPassed) => new(
+        "deploy-" + new string('c', 32), "forge", Sha, null, status, DateTime.UtcNow, null, null, null, null, null, null);
+
+    [Theory]
+    [InlineData("rolled-back", true, true)]
+    [InlineData("rolling-back", true, false)]
+    [InlineData("committed", true, false)]
+    [InlineData("rolled-back", false, false)]
+    public async Task RetryRequiresStoppedJournalWithExactIdentity(string phase, bool matches, bool expected)
+    {
+        var project = Project() with { RepoUrl = "https://github.com/Xyrces/Forge", DefaultBranch = "main" };
+        project.Deployment!.RoutineImageRepository = "registry/forge";
+        var target = new DeploymentTargetSnapshot("uat", "UAT", "forge", project.Deployment.KubernetesDatasetId!);
+        var receipt = new TrustedImageReceipt(Sha, Image, true, true, "controller-image.yml", "92", "Xyrces/Forge", "main",
+            "93", "sha256:" + new string('d', 64), Forge.Core.IssueStore.CurrentSchemaVersion, "ci.yml", "91");
+        var candidate = Candidate(DeploymentStatus.DeployFailed) with { CompletionId = "completion", EnvironmentName = "uat", TargetJson = JsonSerializer.Serialize(target), ReceiptJson = JsonSerializer.Serialize(receipt) };
+        var body = JsonSerializer.Serialize(new { data = new { phase, image = Image, dataset = target.KubernetesDatasetId,
+            environment = "uat", @namespace = "forge", sourceSha = matches ? Sha : new string('f', 40) } });
+        var executor = new KubernetesDeploymentExecutor(Client(new FakeHandler(body)));
+        Assert.Equal(expected, await executor.IsRetrySafeAsync(project, candidate, default));
+        executor = new KubernetesDeploymentExecutor(Client(new FakeHandler("{}") { MissingJournal = true, MissingJob = true }));
+        Assert.False(await executor.IsRetrySafeAsync(project, candidate, default));
+        Assert.True(await executor.IsRetrySafeAsync(project, candidate with { Status = DeploymentStatus.Rejected }, default));
+    }
+
+    [Fact]
+    public void NamedReleaseManifestUsesCapturedTargetAndRequiresRoutedVerification()
+    {
+        var target = new DeploymentTargetSnapshot("prod", "Production", "forge-prod", "99ff50b7-9ef3-474d-962b-716b1d4cf274");
+        var candidate = Candidate() with { EnvironmentName = "prod", TargetJson = JsonSerializer.Serialize(target) };
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(KubernetesDeploymentExecutor.BuildManifest(Project(), candidate)));
+        Assert.Equal("forge-prod", document.RootElement.GetProperty("metadata").GetProperty("namespace").GetString());
+        var args = document.RootElement.GetProperty("spec").GetProperty("template").GetProperty("spec").GetProperty("containers")[0]
+            .GetProperty("args").EnumerateArray().Select(x => x.GetString()).ToArray();
+        Assert.Contains("--environment", args);
+        Assert.Contains("prod", args);
+        Assert.Contains(target.KubernetesDatasetId, args);
+        Assert.Throws<InvalidOperationException>(() => KubernetesDeploymentExecutor.BuildManifest(Project(), candidate with { EnvironmentName = "uat" }));
+    }
+
+    [Fact]
+    public async Task NamedReleaseCannotFinishWithoutTargetSpecificVerification()
+    {
+        var project = Project() with { RepoUrl = "https://github.com/Xyrces/Forge", DefaultBranch = "main" };
+        project.Deployment!.RoutineImageRepository = "registry/forge";
+        var target = new DeploymentTargetSnapshot("uat", "UAT", "forge", project.Deployment.KubernetesDatasetId!);
+        var receipt = new TrustedImageReceipt(Sha, Image, true, true, "controller-image.yml", "92", "Xyrces/Forge", "main",
+            "93", "sha256:" + new string('d', 64), Forge.Core.IssueStore.CurrentSchemaVersion, "ci.yml", "91");
+        var candidate = Candidate() with { EnvironmentName = "uat", TargetJson = JsonSerializer.Serialize(target), ReceiptJson = JsonSerializer.Serialize(receipt) };
+        var body = JsonSerializer.Serialize(new { data = new { image = Image, dataset = target.KubernetesDatasetId, phase = "committed" } });
+        var result = await new KubernetesDeploymentExecutor(Client(new FakeHandler(body))).ReadProgressAsync(project, candidate, default);
+        Assert.False(result.Success);
+        body = JsonSerializer.Serialize(new { data = new { image = Image, dataset = target.KubernetesDatasetId, phase = "committed",
+            targetVerified = "true", environment = "uat", sourceSha = Sha, @namespace = "forge" } });
+        result = await new KubernetesDeploymentExecutor(Client(new FakeHandler(body))).ReadProgressAsync(project, candidate, default);
+        Assert.True(result.Success);
+    }
+
+    [Fact]
+    public async Task RoutinePinnedReceiptNeedsNoCatalogAndCannotFallBackWhenMissing()
+    {
+        var project = Project() with { RepoUrl = "https://github.com/Xyrces/Forge", DefaultBranch = "main" };
+        project.Deployment!.RoutineImageRepository = "registry/forge";
+        var receipt = new TrustedImageReceipt(Sha, Image, true, true, "controller-image.yml", "92", "Xyrces/Forge", "main",
+            "93", "sha256:" + new string('d', 64), Forge.Core.IssueStore.CurrentSchemaVersion, "ci.yml", "91");
+        var handler = new FakeHandler("{}");
+        var executor = new KubernetesDeploymentExecutor(Client(handler));
+        var candidate = Candidate() with { CompletionId = "completion-1", ReceiptJson = JsonSerializer.Serialize(receipt) };
+        Assert.Equal(Image, KubernetesDeploymentExecutor.ResolveImage(await executor.ResolveProfileAsync(project, candidate, default), candidate));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => executor.ResolveProfileAsync(project, candidate with { ReceiptJson = null }, default));
+        Assert.Equal(0, handler.Calls);
+    }
+
+    [Fact]
+    public async Task CatalogIsReadForExactSourceWithoutChangingConfig()
+    {
+        var project = Project();
+        project.Deployment!.KubernetesImages.Clear();
+        project.Deployment.KubernetesImageCatalog = "forge-image-catalog";
+        var handler = new FakeHandler(JsonSerializer.Serialize(new { data = new Dictionary<string, string> { [Sha] = Image } }));
+        var resolved = await new KubernetesDeploymentExecutor(Client(handler)).ResolveProfileAsync(project, Candidate(), default);
+        Assert.Equal(Image, KubernetesDeploymentExecutor.ResolveImage(resolved, Candidate()));
+        Assert.Empty(project.Deployment.KubernetesImages);
+    }
+
+    [Fact]
+    public void ReleaseManifestHasIndependentLifetimeAndExactImage()
+    {
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(KubernetesDeploymentExecutor.BuildManifest(Project(), Candidate())));
+        Assert.Equal(3, json.RootElement.GetProperty("spec").GetProperty("backoffLimit").GetInt32());
+        Assert.Equal("Never", json.RootElement.GetProperty("spec").GetProperty("template").GetProperty("spec").GetProperty("restartPolicy").GetString());
+        var root = json.RootElement;
+        Assert.False(root.GetProperty("metadata").TryGetProperty("ownerReferences", out _));
+        Assert.False(root.GetProperty("spec").TryGetProperty("ttlSecondsAfterFinished", out _));
+        var pod = root.GetProperty("spec").GetProperty("template").GetProperty("spec");
+        Assert.Equal("forge-release", pod.GetProperty("serviceAccountName").GetString());
+        Assert.Equal(Image, pod.GetProperty("containers")[0].GetProperty("image").GetString());
+        Assert.True(pod.GetProperty("automountServiceAccountToken").GetBoolean());
+        foreach (var mount in pod.GetProperty("containers")[0].GetProperty("volumeMounts").EnumerateArray())
+        {
+            var path = mount.GetProperty("mountPath").GetString()!.Replace("/var/run/", "/run/").TrimEnd('/');
+            Assert.False(mount.GetProperty("readOnly").GetBoolean() &&
+                (path == "/run/secrets/kubernetes.io/serviceaccount" ||
+                 "/run/secrets/kubernetes.io/serviceaccount".StartsWith(path + "/", StringComparison.Ordinal)));
+            if (mount.GetProperty("name").GetString() == "control-token") Assert.Equal("/run/forge-control", path);
+        }
+        Assert.Equal("/run/forge-control/controller-token", new ControllerOptions().TokenFile);
+    }
+
+    [Fact]
+    public async Task PendingCannotBypassBuildGate()
+    {
+        var handler = new FakeHandler("{}");
+        var result = await new KubernetesDeploymentExecutor(Client(handler)).ExecuteAsync(Project(), Candidate(DeploymentStatus.Pending));
+        Assert.False(result.Success);
+        Assert.Equal(0, handler.Calls);
+    }
+
+    [Fact]
+    public async Task AcceptedJobRemainsInProgress()
+    {
+        var handler = new FakeHandler("{}");
+        var result = await new KubernetesDeploymentExecutor(Client(handler)).ExecuteAsync(Project(), Candidate());
+        Assert.True(result.StillInProgress);
+        Assert.False(result.Success);
+        Assert.Equal(2, handler.Calls);
+    }
+
+    [Fact]
+    public void UnknownSourceCannotSelectImage()
+    {
+        Assert.Throws<InvalidOperationException>(() => KubernetesDeploymentExecutor.ResolveImage(Project(), Candidate() with { CommitSha = new string('d', 40) }));
+    }
+
+    [Theory]
+    [InlineData("committed", true, false)]
+    [InlineData("rolled-back", false, false)]
+    [InlineData("rolling-back", false, true)]
+    public async Task JournalSurvivesControllerReplacement(string phase, bool success, bool pending)
+    {
+        var body = JsonSerializer.Serialize(new { data = new { image = Image, dataset = Project().Deployment!.KubernetesDatasetId, phase } });
+        var result = await new KubernetesDeploymentExecutor(Client(new FakeHandler(body))).ReadProgressAsync(Project(), Candidate(), default);
+        Assert.Equal(success, result.Success);
+        Assert.Equal(pending, result.StillInProgress);
+    }
+
+    [Fact]
+    public async Task WrongDatasetJournalIsNotAccepted()
+    {
+        var body = JsonSerializer.Serialize(new { data = new { image = Image, dataset = "other", phase = "committed" } });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new KubernetesDeploymentExecutor(Client(new FakeHandler(body)))
+            .ReadProgressAsync(Project(), Candidate(), default));
+    }
+
+    [Fact]
+    public async Task HeldGateAfterApprovalPreventsMissingJobCreationButAllowsExistingProgress()
+    {
+        var handler = new FakeHandler("{}") { MissingJournal = true, MissingJob = true };
+        var executor = new KubernetesDeploymentExecutor(Client(handler));
+        var candidate = Candidate(DeploymentStatus.Approved);
+        var held = await executor.ReadProgressAsync(Project(), candidate, default, _ => Task.FromResult(false));
+        Assert.True(held.AdmissionHeld);
+        Assert.Equal(0, handler.Posts);
+        handler.MissingJob = false;
+        var ongoing = await executor.ReadProgressAsync(Project(), candidate, default, _ => throw new InvalidOperationException("Already running must not consult start gate"));
+        Assert.True(ongoing.StillInProgress);
+        Assert.False(ongoing.AdmissionHeld);
+        handler.MissingJob = true;
+        var resumed = await executor.ReadProgressAsync(Project(), candidate, default, _ => Task.FromResult(true));
+        Assert.True(resumed.StillInProgress);
+        Assert.Equal(1, handler.Posts);
+    }
+
+    private static HttpClient Client(FakeHandler handler) => new(handler) { BaseAddress = new Uri("https://kubernetes/") };
+    private sealed class FakeHandler(string body) : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+        public int Posts;
+        public bool MissingJournal;
+        public bool MissingJob;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            if (request.Method == HttpMethod.Post) { Posts++; return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created)); }
+            if ((MissingJournal && request.RequestUri!.AbsolutePath.Contains("/configmaps/forge-release-")) ||
+                (MissingJob && request.RequestUri!.AbsolutePath.Contains("/jobs/forge-release-")))
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            var payload = request.RequestUri!.AbsolutePath.EndsWith("/forge-image-catalog", StringComparison.Ordinal)
+                ? JsonSerializer.Serialize(new { data = new Dictionary<string, string> { [Sha] = JsonSerializer.Serialize(new {
+                    sourceSha = Sha, imageDigest = Image, buildPassed = true, testPassed = true,
+                    workflow = "controller-image.yml", workflowRunId = "123" }) } }) : body;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(payload, Encoding.UTF8, "application/json") });
+        }
+    }
+}

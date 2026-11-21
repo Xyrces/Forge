@@ -101,8 +101,9 @@ public static class ProjectsEndpoints
             QaEnabled: ctx.Options.QaEnabled));
     }
 
-    private static async Task<IResult> AddProjectAsync(
+    internal static async Task<IResult> AddProjectAsync(
         AddProjectRequest? body,
+        HttpContext context,
         IProjectStore store,
         ProjectCloner cloner,
         Configuration.GitHubOptions github,
@@ -118,6 +119,20 @@ public static class ProjectsEndpoints
             return Results.BadRequest(new { error = secretError });
 
         var logger = loggerFactory.CreateLogger("Projects.Add");
+
+        var provisioner = context.RequestServices.GetService<IProjectProvisioner>();
+        if (provisioner is not null)
+        {
+            if (context.Items[DashboardMutationAuthentication.AuthenticatedOperatorItem] is not string)
+                return Results.Unauthorized();
+            try { await provisioner.EnsureReadyAsync(body.Id, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Project {Project} storage is not yet qualified; registration was not changed", body.Id);
+                return Results.Problem("Project storage provisioning has not completed. Existing projects remain available. Retry this registration; inspect the project provisioning Job if it fails again.", statusCode: 503);
+            }
+        }
 
         // Register the row first (secret has an FK to it). The branch
         // may be a placeholder here — detection below re-upserts.
@@ -211,9 +226,12 @@ public static class ProjectsEndpoints
         return Results.Ok(new { project = record, clone });
     }
 
-    private static async Task<IResult> RemoveProjectAsync(
-        string id, IProjectStore store, CancellationToken ct)
+    internal static async Task<IResult> RemoveProjectAsync(
+        string id, IProjectStore store, ProjectContextFactory factory, CancellationToken ct)
     {
+        if (await store.GetAsync(id, ct) is null)
+            return Results.NotFound(new { error = "project not found", id });
+        await factory.PreserveArtifactHistoryAsync(id, ct);
         var removed = await store.DeleteAsync(id, ct);
         return removed ? Results.NoContent() : Results.NotFound(new { error = "project not found", id });
     }

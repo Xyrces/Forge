@@ -97,7 +97,7 @@ public class RunVerificationTests : IDisposable
     }
 
     [Fact]
-    public async Task FlakyTests_PassInIsolation_GatePassesWithNote()
+    public async Task FullSuiteFailure_PassesInIsolation_RemainsBlocking()
     {
         // Fake dotnet: full-run "test" fails with xUnit-style [FAIL]
         // lines; the --filter isolation re-run passes.
@@ -114,18 +114,19 @@ public class RunVerificationTests : IDisposable
             echo "[xUnit.net 00:00:01.01]     Some.Tests.FlakyTest.Two [FAIL]"
             echo "Failed! - Failed: 2, Passed: 100"
             exit 1
-            """);
+            """.Replace("\r\n", "\n"));
         File.SetUnixFileMode(shim, UnixFileMode.UserExecute | UnixFileMode.UserRead);
 
         var result = await RunVerification.RunAsync(
             _workDir, new[] { $"export PATH=\"{shimDir}:$PATH\"; dotnet test -c Release --nologo" },
             NullLogger.Instance, CancellationToken.None);
 
-        Assert.True(result.Ok);
-        Assert.Empty(result.Failures);
+        Assert.False(result.Ok);
+        Assert.Single(result.Failures);
+        Assert.True(result.FlakyPasses is not null, string.Join("\n", result.Failures));
         var note = Assert.Single(result.FlakyPasses!);
         Assert.Contains("Some.Tests.FlakyTest.One", note);
-        Assert.Contains("quarantined as flaky", note);
+        Assert.Contains("full-suite failure remains blocking", note);
     }
 
     [Fact]
@@ -142,7 +143,7 @@ public class RunVerificationTests : IDisposable
             fi
             echo "[xUnit.net 00:00:01.00]     Some.Tests.Real.Broken [FAIL]"
             exit 1
-            """);
+            """.Replace("\r\n", "\n"));
         File.SetUnixFileMode(shim, UnixFileMode.UserExecute | UnixFileMode.UserRead);
 
         var result = await RunVerification.RunAsync(
@@ -152,6 +153,8 @@ public class RunVerificationTests : IDisposable
         Assert.False(result.Ok);
         Assert.Single(result.Failures);
         Assert.Null(result.FlakyPasses);
+        Assert.Contains("Some.Tests.Real.Broken", result.Failures[0]);
+        Assert.Contains("exited 1", result.Failures[0]);
     }
 
     [Fact]

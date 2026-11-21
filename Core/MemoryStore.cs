@@ -24,7 +24,7 @@ namespace Forge.Core;
 /// A background sweep (out of scope for v1) would purge them.
 /// </para>
 /// </summary>
-public sealed class MemoryStore : IAsyncDisposable
+public sealed partial class MemoryStore : IAsyncDisposable
 {
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
@@ -57,6 +57,17 @@ public sealed class MemoryStore : IAsyncDisposable
 
     private string T(string name) => _db.Dialect.Table(name);
 
+    public static bool IsReservedReviewOriginKey(string key)
+        => System.Globalization.CultureInfo.InvariantCulture.CompareInfo.IsPrefix(key.TrimStart(), "review/origins/",
+            System.Globalization.CompareOptions.IgnoreCase | System.Globalization.CompareOptions.IgnoreNonSpace
+            | System.Globalization.CompareOptions.IgnoreWidth | System.Globalization.CompareOptions.IgnoreKanaType);
+
+    private static void RequireMutableMemoryKey(string key)
+    {
+        if (IsReservedReviewOriginKey(key))
+            throw new ArgumentException("Review provenance is controller-owned and cannot be edited through project memory.", nameof(key));
+    }
+
     /// <summary>
     /// Upsert by <paramref name="key"/>. Returns the row after the write.
     /// If <paramref name="ttlDays"/> is null, the row never expires;
@@ -66,11 +77,21 @@ public sealed class MemoryStore : IAsyncDisposable
         string key, string body, int? ttlDays = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(key)) throw new ArgumentException("key required", nameof(key));
+        RequireMutableMemoryKey(key);
         if (body is null) throw new ArgumentNullException(nameof(body));
 
         var now = DateTime.UtcNow;
         await using var conn = await _db.OpenAsync(ct);
+        await UpsertAsync(conn, null, key, body, ttlDays, now, ct);
+        var expiresAt = ttlDays is null ? (DateTime?)null : now.AddDays(ttlDays.Value);
+        return new MemoryRecord(Id: 0, Key: key, Body: body, CreatedAt: now, TtlDays: ttlDays, ExpiresAt: expiresAt);
+    }
+
+    private async Task UpsertAsync(DbConnection conn, DbTransaction? transaction, string key,
+        string body, int? ttlDays, DateTime now, CancellationToken ct)
+    {
         await using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
             ? $"""
                 MERGE {T("memory")} WITH (HOLDLOCK) AS t
@@ -91,9 +112,6 @@ public sealed class MemoryStore : IAsyncDisposable
         cmd.AddParam("@body", body);
         cmd.AddParam("@ttl", (object?)ttlDays ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
-
-        var expiresAt = ttlDays is null ? (DateTime?)null : now.AddDays(ttlDays.Value);
-        return new MemoryRecord(Id: 0, Key: key, Body: body, CreatedAt: now, TtlDays: ttlDays, ExpiresAt: expiresAt);
     }
 
     /// <summary>
@@ -109,6 +127,7 @@ public sealed class MemoryStore : IAsyncDisposable
             throw new ArgumentException("key required", nameof(key));
         if (body is null)
             throw new ArgumentNullException(nameof(body));
+        RequireMutableMemoryKey(key);
 
         // Exact-key probe — a full-table RecallAsync here read 72MB
         // PER SEED at boot once the forge memory table grew
@@ -222,6 +241,7 @@ public sealed class MemoryStore : IAsyncDisposable
     /// </summary>
     public async Task<bool> ForgetAsync(string key, CancellationToken ct = default)
     {
+        RequireMutableMemoryKey(key);
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"DELETE FROM {T("memory")} WHERE [key] = @key";
@@ -245,7 +265,7 @@ public sealed class MemoryStore : IAsyncDisposable
         var now = DateTime.UtcNow;
         await using (var read = conn.CreateCommand())
         {
-            read.CommandText = $"SELECT id, ts, ttl_days FROM {T("memory")} WHERE ttl_days IS NOT NULL";
+            read.CommandText = $"SELECT id, ts, ttl_days FROM {T("memory")} WHERE ttl_days IS NOT NULL AND LOWER(LTRIM([key])) NOT LIKE 'review/origins/%'";
             await using var rd = await read.ExecuteReaderAsync(ct);
             while (await rd.ReadAsync(ct))
             {

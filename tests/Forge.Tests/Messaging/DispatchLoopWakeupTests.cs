@@ -7,6 +7,7 @@ using Forge.Dashboard;
 using Forge.Orchestrator;
 using Forge.Orchestrator.Workflow;
 using Forge.Reviewer;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -44,7 +45,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         InitRepo(_workDir);
 
         _dbPath = Path.Combine(_dataRoot, "issues.db");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath,"test");
         _projectStore = new ProjectStore(_issues);
 
         _worktrees = new GitWorktreeService(
@@ -53,7 +54,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         _messageBus = new AgentMessageBus();
         _events = new InMemoryDashboardEventBus();
         _roleRegistry = new RoleAgentRegistry();
-        _github = new GitHubService("", "", "");
+        _github = new LocalGitHubService(_workDir, "local", "wakeup");
         _prWatcher = new PRWatcher(
             _github, _worktrees, _issues,
             TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30), _events,
@@ -75,16 +76,50 @@ public sealed class DispatchLoopWakeupTests : IDisposable
             logger: NullLogger<ProjectDispatchBundle>.Instance);
     }
 
+    private async Task ActivateApprovedAsync(IssueRecord task)
+    {
+        var scope=await ApprovedSprintFixture.Scope(_issues);await ApprovedSprintFixture.Bind(_issues,scope,[task]);
+        var snapshot=await new SprintActivationValidator(_issues,_bundle.Sprints,new SpecStore(_issues),"test",null).ValidateAsync([task.Id],default);
+        await _bundle.Sprints.CreateWithIssuesAsync(new("test","test",DateTime.UtcNow,DateTime.UtcNow.AddDays(1)),snapshot);
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_workDir, recursive: true); } catch { }
         try { Directory.Delete(_dataRoot, recursive: true); } catch { }
     }
 
-    private sealed class ScriptedRunner(string response) : IAgentRunner
+    private sealed class DispatchObserver : ILogger<OrchestratorAgent>
     {
-        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context, CancellationToken ct)
-            => Task.FromResult(new AgentRunResult(response, null, 1, 1, TimeSpan.FromMilliseconds(1)));
+        public TaskCompletionSource EmptyCycleObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource EventWakeObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            if (message.StartsWith("Dispatch cycle: no active sprint", StringComparison.Ordinal))
+                EmptyCycleObserved.TrySetResult();
+            if (message == "Dispatch loop woke on event signal") EventWakeObserved.TrySetResult();
+        }
+    }
+
+    private sealed class DrainingRunner : IAgentRunner
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowExit { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+        {
+            using var registration = ct.Register(() => CancellationObserved.TrySetResult());
+            Started.TrySetResult();
+            await AllowExit.Task;
+            ct.ThrowIfCancellationRequested();
+            return new AgentRunResult("NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.Zero);
+        }
     }
 
     private sealed class StubBundleFactory(ProjectDispatchBundle bundle) : IProjectDispatchBundleFactory
@@ -92,7 +127,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         public ProjectDispatchBundle Build(ProjectOptions project) => bundle;
     }
 
-    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner)
+    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, ILogger<OrchestratorAgent>? logger = null)
     {
         var orch = new OrchestratorAgent(
             _projectStore,
@@ -104,7 +139,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
                 (issue, bundle, ct) => RunWorkflowInProcess(runner, issue, ct),
                 NullLogger<InProcessDispatcher>.Instance),
             _events,
-            NullLogger<OrchestratorAgent>.Instance,
+            logger ?? NullLogger<OrchestratorAgent>.Instance,
             wakeup: _wakeup);
         orch.BindOptions(new AgentOptions
         {
@@ -142,56 +177,86 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
 
-        var orch = BuildOrchestrator(new ScriptedRunner("ok. NO_CHANGES_NEEDED"));
+        var runner = new DrainingRunner();
+        var observer = new DispatchObserver();
+        var orch = BuildOrchestrator(runner, observer);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var loop = orch.ExecuteAsync(cts.Token);
 
-        // The loop runs its first cycle immediately, then parks on the
-        // wakeup signal (PollIntervalSeconds is deliberately huge —
-        // unreachable in this test — so only the signal can wake it).
-        // Give the first cycle a moment to park.
-        await Task.Delay(500, cts.Token);
-
-        var task = await _issues.CreateAsync(new NewIssue(
-            Type: "dev", Title: "late work", Description: "enqueued after the loop parked",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        var sprint = await _bundle.Sprints.CreateAsync(new NewSprint(
-            Name: "sprint", Goal: "g",
-            StartDate: DateTime.UtcNow, EndDate: DateTime.UtcNow.AddDays(1),
-            Status: SprintStatus.Active));
-        await _bundle.Sprints.AddIssueAsync(sprint.Id, task.Id);
-
-        // The kick (production: TaskEnqueuedConsumer on the bus).
-        _wakeup.Signal();
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-        while (DateTime.UtcNow < deadline)
+        try
         {
-            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
-            var t = await _issues.GetAsync(task.Id, cts.Token);
-            if (t!.Status != IssueStatus.Pending) break;
-            await Task.Delay(100, cts.Token);
+            // Observe the empty first cycle instead of guessing when it has run.
+            // Its no-sprint branch cannot admit the task created below.
+            await observer.EmptyCycleObserved.Task.WaitAsync(TimeSpan.FromSeconds(15), cts.Token);
+            Assert.False(runner.Started.Task.IsCompleted);
+            var task = await _issues.CreateAsync(new NewIssue(
+                Type: "dev", Title: "late work", Description: "enqueued after the empty first cycle",
+                Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+            await ActivateApprovedAsync(task);
+
+            // Production's TaskEnqueuedConsumer supplies this kick. Observe its
+            // consumption AND the real engineering workflow entering the runner.
+            _wakeup.Signal();
+            await observer.EventWakeObserved.Task.WaitAsync(TimeSpan.FromSeconds(15), cts.Token);
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(15), cts.Token);
+            Assert.False(loop.IsFaulted, loop.Exception?.GetBaseException().ToString());
+            Assert.False(runner.CancellationObserved.Task.IsCompleted);
+            Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id, cts.Token))!.Status);
         }
+        finally
+        {
+            // Cancellation is cleanup, not the observation under test: cancelling
+            // after a transient claim can requeue interrupted work before this read.
+            cts.Cancel();
+            runner.AllowExit.TrySetResult();
+            try { await loop.WaitAsync(TimeSpan.FromSeconds(20)); }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
+        }
+    }
 
-        cts.Cancel();
-        try { await loop; } catch (OperationCanceledException) { }
-
-        var after = (await _issues.GetAsync(task.Id))!;
-        Assert.NotEqual(IssueStatus.Pending, after.Status);
+    [Fact]
+    public async Task Shutdown_DoesNotReturnUntilLocalDispatchHasDrained()
+    {
+        await _projectStore.UpsertAsync(new NewProject("test", "Test", _workDir, "main"));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "dev", Title: "drain work",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        await ActivateApprovedAsync(task);
+        var runner = new DrainingRunner();
+        using var stop = new CancellationTokenSource();
+        var loop = BuildOrchestrator(runner).ExecuteAsync(stop.Token);
+        try
+        {
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            stop.Cancel();
+            await runner.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(loop.IsCompleted);
+        }
+        finally
+        {
+            stop.Cancel();
+            runner.AllowExit.TrySetResult();
+            try { await loop.WaitAsync(TimeSpan.FromSeconds(20)); }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        }
     }
 
     private static void InitRepo(string path)
     {
-        RunGit(path, "init", "-q -b main");
-        RunGit(path, "config", "user.email a@b");
-        RunGit(path, "config", "user.name a");
+        RunGit(path, "init", "-q", "-b", "main");
+        RunGit(path, "config", "user.email", "a@b");
+        RunGit(path, "config", "user.name", "a");
         File.WriteAllText(Path.Combine(path, "README.md"), "# Test\n");
         RunGit(path, "add", "README.md");
-        RunGit(path, "commit", "-q -m initial");
+        RunGit(path, "commit", "-q", "-m", "initial");
+        var origin = Path.Combine(path, ".portHorizon", "fixture-origin.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(origin)!);
+        RunGit(path, "init", "--bare", "-q", origin);
+        RunGit(path, "remote", "add", "origin", origin);
+        RunGit(path, "push", "-q", "-u", "origin", "main");
     }
 
-    private static void RunGit(string cwd, string verb, string args)
+    private static void RunGit(string cwd, string verb, params string[] args)
     {
         var psi = new ProcessStartInfo
         {
@@ -204,7 +269,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         };
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
         psi.ArgumentList.Add(verb);
-        foreach (var part in args.Split(' ')) psi.ArgumentList.Add(part);
+        foreach (var part in args) psi.ArgumentList.Add(part);
         using var p = Process.Start(psi)!;
         p.WaitForExit(60_000);
         if (p.ExitCode != 0)

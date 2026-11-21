@@ -69,7 +69,8 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         // tasks 185/186/189 burned their whole plan-gate revision
         // budget because plans referenced files that landed on main
         // AFTER their worktrees were created, then died on requeue).
-        var reused = Directory.Exists(worktrees.WorktreePathFor(input.Issue.Id));
+        var checkoutKey = IssueWorktreeIdentity.For(input.Issue);
+        var reused = Directory.Exists(worktrees.WorktreePathFor(checkoutKey));
         // One branch value for the whole pipeline: claim metadata,
         // the worktree checkout, the agent prompt, and the push
         // refspec must agree (found live 2026-07-28: a task whose
@@ -78,7 +79,9 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         // the executor's push of the metadata branch failed with
         // "src refspec does not match any", halting the workflow).
         var resolvedBranch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
-        var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct, branchOverride: resolvedBranch);
+        var worktreePath = reused
+            ? await worktrees.CreateAsync(checkoutKey, defaultBranch, ct, branchOverride: resolvedBranch)
+            : await worktrees.CreateFreshAsync(checkoutKey, defaultBranch, ct, branchOverride: resolvedBranch);
         // P4 Stage A: advance the dispatch checkpoint BEFORE we
         // touch metadata. If we crash between CreateAsync and the
         // TransitionAsync below, the recoverer sees
@@ -103,9 +106,17 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
             // skip the sync and create from the default branch.
             // Conflict rework rounds stay unchanged — the agent merges
             // origin/main itself per the rework prompt.
+            var resumeId = issue.GetMetadata("resumeDispatchId");
+            var adoptingWorker = !string.IsNullOrEmpty(resumeId) && resumeId == issue.GetMetadata("dispatchId");
+            if (adoptingWorker)
+            {
+                // A surviving pod may be editing this checkout. Never sync/reset it while adopting its attempt.
+                currentMetadata["resumeDispatchId"] = null!;
+                logger.LogInformation("Adopting dispatch {Dispatch} for {Id}; preserving worker checkout", resumeId, issue.Id);
+            }
             var prNumber = issue.GetMetadata("prNumber");
             var reworkAttempts = issue.GetMetadata("reworkAttempts");
-            if (!string.IsNullOrEmpty(prNumber) && int.TryParse(reworkAttempts, out var reworkCount) && reworkCount > 0)
+            if (!adoptingWorker && !string.IsNullOrEmpty(prNumber) && int.TryParse(reworkAttempts, out var reworkCount) && reworkCount > 0)
             {
                 var remoteRef = $"origin/{branch}";
                 logger.LogInformation(
@@ -115,7 +126,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                 try
                 {
                     await worktrees.SyncWorktreeToRefAsync(
-                        worktreePath, input.Issue.Id, remoteRef, ct);
+                        worktreePath, checkoutKey, remoteRef, ct);
                 }
                 catch (Exception ex)
                 {
@@ -127,7 +138,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                     throw;
                 }
             }
-            else if (reused)
+            else if (reused && !adoptingWorker)
             {
                 // Stale-reuse sync (no PR): a re-dispatched task whose
                 // earlier run died before opening a PR. If the
@@ -137,7 +148,8 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                 // for the agent to continue from.
                 var ahead = await worktrees.CountCommitsAheadAsync(
                     worktreePath, $"origin/{defaultBranch}", ct);
-                if (ahead == 0)
+                var dirty = await worktrees.ListDirtyFilesAsync(worktreePath, ct);
+                if (ahead == 0 && !dirty.Any(file => !file.Ignored))
                 {
                     logger.LogInformation(
                         "Stale worktree reuse for {Id} (no local commits) — syncing to origin/{Base}",
@@ -145,7 +157,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                     try
                     {
                         await worktrees.SyncWorktreeToRefAsync(
-                            worktreePath, input.Issue.Id, $"origin/{defaultBranch}", ct);
+                            worktreePath, checkoutKey, $"origin/{defaultBranch}", ct);
                     }
                     catch (Exception ex)
                     {

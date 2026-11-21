@@ -7,6 +7,8 @@ document covers the other half of "self-maintenance": how a merged
 change actually reaches the **running** Forge instance, and how an
 operator gates that.
 
+For the current K3s sprint delivery workflow, see [Project deployment environments](deployment-environments.md). The candidate workflow below also covers projects using a single deployment target.
+
 ## Design goals
 
 - **Merging is not deploying.** A burst of merges to a project's
@@ -167,7 +169,7 @@ file pickup on next startup, no `DeploymentResultReconciler`.
 ```
 
 The dev repo (wherever `projects[].root` points, e.g.
-`/home/jtn5016/repos/gamedev/Forge`) is completely separate from
+`/home/forge-operator/projects/Forge`) is completely separate from
 this. Agents commit and open PRs there; nothing under `/opt/forge`
 or `/var/lib/forge` is ever git-tracked.
 

@@ -27,8 +27,8 @@ public interface ISqlServerMigration
 /// <c>Core/IssueStore.cs</c> (InitializeSchemaSqlite); SQL Server
 /// fresh-creates at the current shape and applies these to existing
 /// databases. To change the SQL Server schema: add a migration here,
-/// update the fresh-create DDL to the final shape, and bump nothing —
-/// <see cref="ExpectedVersion"/> derives from the list.
+/// update the fresh-create DDL and SQLite chain to the final shape, and advance
+/// <see cref="IssueStore.CurrentSchemaVersion"/> to the same version.
 /// </summary>
 public static class SqlServerMigrations
 {
@@ -47,6 +47,14 @@ public static class SqlServerMigrations
         new M034IntakeMessageProposalPayload(),
         new M035FailureTriage(),
         new M036FollowUpDraftTaskType(),
+        new M037ControlPlane(),
+        new M038WorkerAttempts(),
+        new M039BudgetUsage(),
+        new M040InitiativeApproval(),
+        new M041SprintCompletion(),
+        new M042ImplementationEvidence(),
+        new M043OwnedArtifactHistory(),
+        new M044DeploymentEnvironments(),
     };
 
     public static int ExpectedVersion =>

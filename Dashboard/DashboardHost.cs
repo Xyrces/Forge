@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -33,6 +33,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Orchestrator.MemoryExtractionStore? _extractions;
     private readonly string? _issuesJsonlPath;
     private readonly VisionStore? _vision;
+    private readonly IVisionConversation? _visionConversation;
     private readonly Orchestrator.DesignerAgentFactory? _designerFactory;
     private readonly DesignerRunStore? _designerRuns;
     private readonly DesignArtifactStore? _designArtifacts;
@@ -57,6 +58,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ProjectContextFactory? _projectFactory;
     private readonly SlotTable? _slots;
     private readonly IProjectStore? _projectStore;
+    private readonly IProjectProvisioner? _projectProvisioner;
     private readonly ProjectCloner? _projectCloner;
     private readonly Forge.Core.SecretStore? _secretStore;
     private readonly AgentRunStore? _agentRuns;
@@ -65,6 +67,10 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
     private readonly Forge.Core.ModelRateLimitTracker? _modelRateLimits;
     private readonly Func<string, GitHubService?>? _gitHubForProject;
+    private readonly Func<string, string, CancellationToken, Task<bool>>? _hasActiveWorker;
+    private readonly Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? _workerHistory;
+    private readonly Core.Control.IDurableBudgetStore? _budgetStore;
+    private readonly string? _budgetDatasetId;
     private readonly Forge.Agents.ProviderApiKeyResolver? _providerApiKeys;
     private readonly Forge.Core.Messaging.IEventPublisher? _eventPublisher;
     private readonly Talaria.Core.Abstractions.ITransport? _transport;
@@ -73,6 +79,11 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
     private int _port;
+
+    private readonly Agents.InitiativeApprovalService? _initiativeApprovals;
+    private readonly string? _mutationTokenFile;
+    private readonly Forge.Deploy.IRoutineReleaseSource? _releaseSource;
+    private readonly Action? _wakeDelivery;
 
     public DashboardHost(
         DashboardOptions options,
@@ -126,8 +137,22 @@ public sealed class DashboardHost : IAsyncDisposable
         Func<string, GitHubService?>? gitHubForProject = null,
         Forge.Agents.ProviderApiKeyResolver? providerApiKeys = null,
         Forge.Core.Messaging.IEventPublisher? eventPublisher = null,
-        Talaria.Core.Abstractions.ITransport? transport = null)
+        Talaria.Core.Abstractions.ITransport? transport = null,
+        Func<string, string, CancellationToken, Task<bool>>? hasActiveWorker = null,
+        Core.Control.IDurableBudgetStore? budgetStore = null,
+        string? budgetDatasetId = null,
+        Agents.InitiativeApprovalService? initiativeApprovals = null,
+        string? mutationTokenFile = null,
+        Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? workerHistory = null,
+        IProjectProvisioner? projectProvisioner = null, Forge.Deploy.IRoutineReleaseSource? releaseSource = null, Action? wakeDelivery = null,
+        IVisionConversation? visionConversation = null)
     {
+        _projectProvisioner = projectProvisioner;
+        _releaseSource = releaseSource;
+        _wakeDelivery = wakeDelivery;
+        _mutationTokenFile = mutationTokenFile;
+        _workerHistory = workerHistory;
+        _initiativeApprovals = initiativeApprovals;
         _options = options;
         _headroom = headroom;
         _issues = issues;
@@ -153,6 +178,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _startupRecovery = startupRecovery;
         _costTracker = costTracker;
         _vision = vision;
+        _visionConversation = visionConversation;
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
         _codebaseCacheOverride = codebaseCache;
@@ -177,6 +203,9 @@ public sealed class DashboardHost : IAsyncDisposable
         _lifecycle = lifecycle;
         _modelRateLimits = modelRateLimits;
         _gitHubForProject = gitHubForProject;
+        _hasActiveWorker = hasActiveWorker;
+        _budgetStore = budgetStore;
+        _budgetDatasetId = budgetDatasetId;
         _providerApiKeys = providerApiKeys;
         _eventPublisher = eventPublisher;
         _transport = transport;
@@ -232,12 +261,15 @@ public sealed class DashboardHost : IAsyncDisposable
         // entry; otherwise the legacy Hostname:Port wins.
         var publicBaseUrl = ResolveBaseUrl();
         var localBaseAddress = ResolveLocalBaseAddress();
-        builder.Services.AddForgeUI(new Uri(publicBaseUrl), new Uri(localBaseAddress));
+        var mutationAuthentication = _mutationTokenFile is null ? null
+            : new DashboardMutationAuthentication(await File.ReadAllTextAsync(_mutationTokenFile, cancellationToken));
+        builder.Services.AddForgeUI(builder.Environment, new Uri(publicBaseUrl), new Uri(localBaseAddress), mutationAuthentication);
 
         if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
         if (_slots is not null) builder.Services.AddSingleton(_slots);
         if (_projectFactory is not null) builder.Services.AddSingleton<Forge.Deploy.DeploymentExecutorFactory>();
         if (_projectStore is not null) builder.Services.AddSingleton(_projectStore);
+        if (_projectProvisioner is not null) builder.Services.AddSingleton(_projectProvisioner);
         if (_projectCloner is not null) builder.Services.AddSingleton(_projectCloner);
         if (_githubOptions is not null) builder.Services.AddSingleton(_githubOptions);
         // Messaging pass-through: the SAME transport + publisher
@@ -290,7 +322,10 @@ public sealed class DashboardHost : IAsyncDisposable
         }
 
  _app = builder.Build();
+        mutationAuthentication?.Protect(_app);
         _app.Urls.Clear();
+        if (_options.Kestrel is not { Endpoints.Count: > 0 })
+            _app.Urls.Add(publicBaseUrl);
         // Kestrel already binds the configured endpoints via the
         // ConfigureKestrel calls above. Clearing Urls prevents the
         // generic host from also binding Hostname:Port (which would
@@ -441,14 +476,24 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             }
         });
 
-        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory);
+        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory,
+            _memory is null ? null : new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _sprintPropose?.Planning);
+
+        if (!string.IsNullOrWhiteSpace(_githubOptions?.WebhookSecretFile))
+        {
+            if (_projectStore is null || _eventPublisher is null)
+                throw new InvalidOperationException("GitHub webhook ingress requires the project registry and event publisher.");
+            var webhookSecret = (await File.ReadAllTextAsync(_githubOptions.WebhookSecretFile, cancellationToken)).Trim();
+            GitHubWebhookEndpoints.MapGitHubWebhookEndpoints(_app, webhookSecret, _projectStore, _eventPublisher);
+        }
 
         if (_projectFactory is not null && _slots is not null)
         {
             ProjectsEndpoints.MapProjectsEndpoints(_app);
             ProjectLookupEndpoints.MapProjectLookupEndpoints(_app);
             SecretsEndpoints.MapSecretsEndpoints(_app);
-            DeploymentsEndpoints.MapDeploymentsEndpoints(_app);
+            DeploymentsEndpoints.MapDeploymentsEndpoints(_app, _wakeDelivery);
+            if (_releaseSource is not null) DeploymentEnvironmentEndpoints.MapInstallation(_app, _releaseSource);
         }
 
         // Cert download — the install helper for first-time
@@ -477,10 +522,10 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         if (_intakeRegistry is not null)
         {
-            IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
+            IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger, _initiativeApprovals);
         }
 
-        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues);
+        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues, _initiativeApprovals, _eventPublisher, _designerRuns);
 
         if (_memory is not null)
         {
@@ -499,13 +544,14 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         if (_vision is not null)
         {
-            VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger, _memory, _issues, _projectFactory);
+            VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger, _memory, _issues, _projectFactory, _visionConversation);
         }
 
         if (_memory is not null)
         {
             GateEndpoints.MapGateEndpoints(_app,
-                new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _logger);
+                new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _logger,
+                _eventPublisher, _projectStore, _wakeDelivery);
             RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(_app, _gateOptions ?? new GateOptions(), _memory, _logger);
             WorkflowEndpoints.MapWorkflowEndpoints(_app, _memory, _bus, _logger);
         }
@@ -515,15 +561,36 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
             _memory, _projectFactory);
         NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory, _agentRuns, _projectFactory);
+        BudgetEndpoints.MapBudgetEndpoints(_app, _budgetStore, _budgetDatasetId, _logger);
         if (_agentRuns is not null)
         {
-            AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory);
+            AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory, _issues);
         }
         AgentsEndpoints.MapAgentsEndpoints(_app, new Agents.RoleAgentRegistry(),
             _llmConfig, _roleModelOverrides, _slots, _agentRuns, _projectFactory,
             _providerApiKeys);
         QueueEndpoints.MapQueueEndpoints(_app, _issues, _sprints, _projectFactory,
             _slots, _llmConfig, _roleModelOverrides, _modelRateLimits);
+        SprintReadEndpoints.MapSprintReadEndpoints(_app, _issues, _projectFactory);
+        var runningRevision = new RunningRevisionReader(_logger);
+        CompletionEndpoints.MapCompletionEndpoints(_app, _issues, _projectFactory, runningRevision.ReadAsync);
+        string? ReviewConfigurationIssue(string projectId, RequiredReview mode)
+        {
+            var repo = ProjectDispatchBundleFactory.ParseGitHubOwnerRepo(_projectFactory?.Find(projectId)?.Options.RepoUrl);
+            var owner = repo?.Owner ?? _githubOptions?.Owner ?? "";
+            var name = repo?.Repo ?? _githubOptions?.Repo ?? "";
+            try
+            {
+                var hasReviewer = _gitHub is LocalGitHubService || GitHubAppIdentities.Find(owner, name) is not null;
+                return PullRequestReviewPolicy.ReviewerConfigurationIssue(mode, hasReviewer);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Invalid GitHub App configuration for project {Project}", projectId);
+                return "The GitHub App configuration could not be read. Correct it and rerun the Forge preflight check.";
+            }
+        }
+        TaskReviewEndpoints.MapTaskReviewEndpoints(_app, _issues, _projectFactory, _eventPublisher, _logger, ReviewConfigurationIssue);
         TriageEndpoints.MapTriageEndpoints(_app, _issues, _logger, _projectFactory, _slots);
 
 if (_groomerRuns is not null)
@@ -532,7 +599,7 @@ if (_groomerRuns is not null)
                 if (_designerFactory is not null && _designerRuns is not null && _designArtifacts is not null)
                 {
                     DesignerEndpoints.MapDesignerEndpoints(
-                        _app, _specs, _designerFactory, _designerRuns, _designArtifacts, _logger);
+                        _app, _designerFactory.Specs, _designerFactory, _designerRuns, _designArtifacts, _logger);
                 }
                 if (_artistFactory is not null && _artistRuns is not null && _artOutputs is not null && _meshy is not null)
                 {
@@ -559,24 +626,24 @@ if (_groomerRuns is not null)
             if (_designArtifacts is not null && _artOutputs is not null)
             {
                 DesignArtEndpoints.MapDesignArtEndpoints(
-                    _app, _designArtifacts, _artOutputs, _designerRuns, _artistRuns, _logger);
+                    _app, _designArtifacts, _artOutputs, _designerRuns, _artistRuns, _logger, _designerFactory?.Specs ?? _specs);
             }
 
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)
         {
             CodebaseGraphEndpoints.MapCodebaseGraphEndpoints(_app, _codebaseBuilderOverride, _codebaseCacheOverride, _issues, _logger);
-
-            if (_sprintPropose is not null && _sprintProposalAudit is not null)
-            {
-                SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger, _projectFactory, _issues);
-            }
-
-            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
-                _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
-                _lifecycle, _gitHubForProject);
         }
 
-        _app.MapBuildInfoEndpoint();
+        if (_sprintPropose is not null && _sprintProposalAudit is not null)
+        {
+            SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger, _projectFactory, _issues);
+        }
+
+        TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
+            _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
+            _lifecycle, _gitHubForProject, hasActiveWorker: _hasActiveWorker, workerHistory: _workerHistory);
+
+        _app.MapBuildInfoEndpoint(runningRevision);
 
         _app.MapGet("/api/agents", () =>
         {

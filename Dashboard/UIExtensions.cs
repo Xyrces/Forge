@@ -20,18 +20,28 @@ namespace Forge.Dashboard;
 
 public static class UIExtensions
 {
-    public static IServiceCollection AddForgeUI(this IServiceCollection services, Uri publicBaseAddress, Uri localBaseAddress)
+    public static IServiceCollection AddForgeUI(this IServiceCollection services, IHostEnvironment environment,
+        Uri publicBaseAddress, Uri localBaseAddress, DashboardMutationAuthentication? mutationAuthentication = null)
     {
+        if (mutationAuthentication is not null)
+            services.ConfigureAll<Microsoft.Extensions.Http.HttpClientFactoryOptions>(options =>
+                options.HttpMessageHandlerBuilderActions.Add(builder =>
+                    builder.AdditionalHandlers.Add(mutationAuthentication.CreateHandler(localBaseAddress))));
         var uiAssembly = typeof(App).Assembly;
         services.AddRazorComponents()
-            .AddInteractiveServerComponents();
+            .AddInteractiveServerComponents()
+            .AddHubOptions(options =>
+                options.MaximumReceiveMessageSize = Forge.Dashboard.Services.VisionUiLimits.MaxHubMessageBytes);
         services.Configure<Microsoft.AspNetCore.Components.Server.CircuitOptions>(o => o.DetailedErrors = true);
         services.AddFluxor(options =>
-            options.ScanAssemblies(uiAssembly)
-                   .UseReduxDevTools());
+        {
+            options.ScanAssemblies(uiAssembly);
+            if (environment.IsDevelopment())
+                options.UseReduxDevTools();
+        });
         // publicBaseAddress is what the Blazor ForgeUI component
         // sees (so the rendered HTML links to e.g.
-        // https://192.168.68.78:443/...). localBaseAddress is what
+        // https://dashboard.example.org:443/...). localBaseAddress is what
         // the server-side HttpClient uses for its API calls — it
         // must be a real hostname (not 0.0.0.0 / *), and loopback is
         // always reachable regardless of which network interface

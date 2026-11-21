@@ -33,9 +33,9 @@ public sealed class LoadCommitsEffect : Effect<DeploymentsActions.LoadCommitsAct
             var rows = await _client.ListCommitsAsync(action.ProjectId, CancellationToken.None);
             dispatcher.Dispatch(new DeploymentsActions.CommitsLoadedAction(action.ProjectId, rows));
         }
-        catch
+        catch (Exception ex)
         {
-            dispatcher.Dispatch(new DeploymentsActions.CommitsLoadedAction(action.ProjectId, Array.Empty<CommitRow>()));
+            dispatcher.Dispatch(new DeploymentsActions.CommitsLoadFailedAction(action.ProjectId, ex.Message));
         }
     }
 }

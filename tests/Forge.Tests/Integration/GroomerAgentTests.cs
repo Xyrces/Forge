@@ -23,7 +23,7 @@ public class GroomerAgentTests : IDisposable
     public GroomerAgentTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("groomer");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath, projectId: "P");
         _specs = new SpecStore(_issues);
     }
 
@@ -33,6 +33,42 @@ public class GroomerAgentTests : IDisposable
         try { File.Delete(_dbPath); } catch { }
     }
 
+    private sealed class ObserveAfterToolClient(IChatClient inner, Func<Task> observe) : DelegatingChatClient(inner)
+    {
+        private int _calls;
+        public override async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            if (_calls++ > 0) await observe();
+            return await base.GetResponseAsync(messages, options, cancellationToken);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GroomedRequest_IsNotPublishedUntilRunFinishes(bool failAfterTool)
+    {
+        var spec = await _specs.CreateAsync(new NewSpec(ProjectId: "P", Title: "T", Body: "body"));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
+        var observed = false;
+        var client = new ObserveAfterToolClient(new MultiToolCallingChatClient(new[]
+        {
+            new FunctionCallContent("done", "set_spec_status", new Dictionary<string, object?> { ["status"] = "Groomed" }),
+        }, "Done."), async () =>
+        {
+            observed = true;
+            Assert.Equal(SpecStatus.Grooming, (await _specs.GetAsync(spec.Id))!.Status);
+            if (failAfterTool) throw new InvalidOperationException("interrupted after requesting completion");
+        });
+        if (failAfterTool)
+            await Assert.ThrowsAnyAsync<Exception>(() => BuildAgent(client).GroomAsync(spec.Id));
+        else
+            await BuildAgent(client).GroomAsync(spec.Id);
+        Assert.True(observed);
+        Assert.Equal(failAfterTool ? SpecStatus.Grooming : SpecStatus.Groomed, (await _specs.GetAsync(spec.Id))!.Status);
+    }
+
     private GroomerAgent BuildAgent(IChatClient client)
     {
         var factory = new ScriptingChatClientFactory(client);
@@ -40,6 +76,38 @@ public class GroomerAgentTests : IDisposable
         var events = new InMemoryDashboardEventBus();
         return new GroomerAgent(_issues, _specs, events, factory, config,
             NullLogger<GroomerAgent>.Instance, runId: "test-run");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ExplicitResume_ReusesExactRows_AndRequiresEveryPreservedTaskBinding(bool mapped)
+    {
+        var scope = await ApprovedSprintFixture.Scope(_issues);
+        await _specs.SetStatusAsync(scope.SpecId, SpecStatus.Approved);
+        var story = await _issues.CreateAsync(new NewIssue("story", "Preserved story", ParentId: scope.SpecId));
+        var task = await _issues.CreateAsync(new NewIssue("task", "Preserved task", ParentId: story.Id, Priority: 2));
+        if (mapped) await ApprovedSprintFixture.Bind(_issues, scope, [task]);
+        await _specs.SetStatusAsync(scope.SpecId, SpecStatus.Grooming);
+        var before = (await _issues.ListAsync(new IssueFilter())).Count;
+        var client = new MultiToolCallingChatClient([
+            new FunctionCallContent("story", "create_story", new Dictionary<string, object?> { ["title"] = story.Title }),
+            new FunctionCallContent("task", "create_task", new Dictionary<string, object?> { ["storyId"] = story.Id, ["title"] = task.Title }),
+            new FunctionCallContent("done", "set_spec_status", new Dictionary<string, object?> { ["status"] = "Groomed" })
+        ], "Done.");
+        if (mapped)
+        {
+            var result = await BuildAgent(client).GroomAsync(scope.SpecId, resumeExisting: true);
+            Assert.Empty(result!.StoryIds);
+            Assert.Empty(result.TaskIds);
+            Assert.Equal(SpecStatus.Groomed, (await _specs.GetAsync(scope.SpecId))!.Status);
+        }
+        else
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() => BuildAgent(client).GroomAsync(scope.SpecId, resumeExisting: true));
+            Assert.Equal(SpecStatus.Grooming, (await _specs.GetAsync(scope.SpecId))!.Status);
+        }
+        Assert.Equal(before, (await _issues.ListAsync(new IssueFilter())).Count);
     }
 
     [Fact]
@@ -216,9 +284,10 @@ public class GroomerAgentTests : IDisposable
                 new Dictionary<string, object?> { ["status"] = "Groomed" }),
         };
         var agent = BuildAgent(new MultiToolCallingChatClient(fcs, "Done."));
-        var result = await agent.GroomAsync(spec.Id, default);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => agent.GroomAsync(spec.Id, default));
 
-        var storyId = Assert.Single(result!.StoryIds);
+        var storyId = Assert.Single(await _issues.ListAsync(new IssueFilter { Type = "story" })).Id;
+        Assert.Equal(SpecStatus.Grooming,(await _specs.GetAsync(spec.Id))!.Status);
         var tasks = (await _issues.ListAsync(new IssueFilter { Type = "task" }, default)).ToList();
         var task = Assert.Single(tasks);
         Assert.Equal(storyId, task.ParentIssueId);
@@ -365,8 +434,8 @@ public class GroomerRoutingTests : IDisposable
     {
         _dir = TempRoot.Instance.NewDirectory("groomroute");
         Directory.CreateDirectory(_dir);
-        _defaultStore = new IssueStore(Path.Combine(_dir, "default.db"));
-        _projectStore = new IssueStore(Path.Combine(_dir, "proj.db"));
+        _defaultStore = new IssueStore(Path.Combine(_dir, "default.db"), "forge");
+        _projectStore = new IssueStore(Path.Combine(_dir, "proj.db"), "porthorizon");
         // The spec store is shared (primary-backed) in production —
         // specs carry project_id, issues are per-project.
         _specs = new SpecStore(_defaultStore);
@@ -417,7 +486,7 @@ public class GroomerRoutingTests : IDisposable
     }
 
     [Fact]
-    public async Task GroomAsync_UnknownProject_FallsBackToDefaultStore()
+    public async Task GroomAsync_UnknownProject_RejectsFallbackWithoutWritingForeignWork()
     {
         var spec = await _specs.CreateAsync(new NewSpec(
             ProjectId: "ghost", Title: "T", Body: "## Acceptance criteria\n- [ ] x\n"));
@@ -439,11 +508,9 @@ public class GroomerRoutingTests : IDisposable
             issueStoreLookup: _ => null);
 
         var agent = factory.Create(projectId: spec.ProjectId);
-        var result = await agent.GroomAsync(spec.Id, default);
-
-        Assert.NotNull(result);
-        var inDefault = await _defaultStore.ListAsync(new IssueFilter { Type = "story" }, default);
-        Assert.Single(inDefault);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => agent.GroomAsync(spec.Id, default));
+        Assert.Empty(await _defaultStore.ListAsync(new IssueFilter { Type = "story" }));
+        Assert.Empty(await _projectStore.ListAsync(new IssueFilter { Type = "story" }));
     }
 }
 
@@ -461,7 +528,7 @@ public class SprintAssemblerGuardTests : IDisposable
     public SprintAssemblerGuardTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("guard");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath, projectId: "P");
         _specs = new SpecStore(_issues);
     }
 
@@ -480,6 +547,13 @@ public class SprintAssemblerGuardTests : IDisposable
     {
         var foreignSpec = await _specs.CreateAsync(new NewSpec(ProjectId: "porthorizon", Title: "F", Body: "b"));
         var ownSpec = await _specs.CreateAsync(new NewSpec(ProjectId: "forge", Title: "O", Body: "b"));
+
+        foreach (var spec in new[] { foreignSpec, ownSpec })
+        {
+            await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, default);
+            await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, default);
+            await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, default);
+        }
 
         var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal)
         {

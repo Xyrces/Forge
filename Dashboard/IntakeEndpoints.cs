@@ -20,7 +20,8 @@ public static class IntakeEndpoints
         IIssueStore issues,
         ISprintStore sprints,
         IIntakeStore intakeStore,
-        ILogger logger)
+        ILogger logger,
+        InitiativeApprovalService? initiatives = null)
     {
         // List intake sessions (optionally scoped to one project —
         // the dashboard's intake page is project-scoped like every
@@ -44,50 +45,73 @@ public static class IntakeEndpoints
             var spec = await JsonSerializer.DeserializeAsync<NewIntakeSessionRequest>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (spec is null || string.IsNullOrWhiteSpace(spec.ProjectId))
-                return Results.BadRequest(new { error = "projectId required" });
+                return Results.BadRequest(new
+                {
+                    error = "projectId required"
+                });
             var agent = intakeRegistry.ForProject(spec.ProjectId);
             var session = await agent.StartSessionAsync(spec.Title, ctx.RequestAborted);
             return Results.Json(ToSessionView(session), DashboardJson.Options, statusCode: 201);
         });
 
         // Get a single session (with messages).
-        app.MapGet("/api/intake/sessions/{id}", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/intake/sessions/{id}", async (string id, string? projectId, CancellationToken ct) =>
         {
             var session = await intakeStore.GetAsync(id, ct);
-            return session is null
+            return session is null || !MatchesProject(session, projectId)
                 ? Results.NotFound()
                 : Results.Json(ToSessionView(session), DashboardJson.Options);
         });
 
         // Send a user message; runs the LLM, returns the updated session.
-        app.MapPost("/api/intake/sessions/{id}/messages", async (string id, HttpContext ctx) =>
+        app.MapPost("/api/intake/sessions/{id}/messages", async (string id, string? projectId, HttpContext ctx) =>
         {
             var body = await JsonSerializer.DeserializeAsync<SendMessageRequest>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (body is null || string.IsNullOrWhiteSpace(body.Text))
-                return Results.BadRequest(new { error = "text required" });
+                return Results.BadRequest(new
+                {
+                    error = "text required"
+                });
             var session = await intakeStore.GetAsync(id, ctx.RequestAborted);
-            if (session is null) return Results.NotFound();
+            if (session is null || !MatchesProject(session, projectId))
+                return Results.NotFound();
+            if ((body.ProposalId is null) != (body.Revision is null) || body.Revision is <= 0)
+                return Results.BadRequest(new { error = "The working brief requires a proposal and revision." });
+            Forge.Core.Initiatives.InitiativeProposal? brief = null;
+            if (body.ProposalId is not null)
+            {
+                if (initiatives is null) return Results.StatusCode(503);
+                brief = await initiatives.Proposals.GetAsync(session.ProjectId, body.ProposalId, ctx.RequestAborted);
+                if (brief is null || brief.SessionId != id) return Results.NotFound();
+                if (brief.Revision != body.Revision)
+                    return Results.Conflict(new { error = "The working brief changed. Refresh it before sending your message." });
+            }
             var agent = intakeRegistry.ForProject(session.ProjectId);
             try
             {
-                var updated = await agent.SendUserMessageAsync(id, body.Text, ctx.RequestAborted);
+                var updated = await agent.SendUserMessageAsync(id, body.Text, ctx.RequestAborted, brief);
                 return Results.Json(ToSessionView(updated), DashboardJson.Options);
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Intake send-message failed for session {Id}", id);
-                return Results.Json(new { error = ex.Message, sessionId = id },
+                return Results.Json(new
+                {
+                    error = ex.Message,
+                    sessionId = id
+                },
                     DashboardJson.Options, statusCode: 500);
             }
         });
 
         // Accept a proposed epic from a specific assistant message.
         app.MapPost("/api/intake/sessions/{id}/accept-epic/{messageId:long}", async (
-            string id, long messageId, CancellationToken ct) =>
+            string id, long messageId, string? projectId, CancellationToken ct) =>
         {
             var session = await intakeStore.GetAsync(id, ct);
-            if (session is null) return Results.NotFound();
+            if (session is null || !MatchesProject(session, projectId))
+                return Results.NotFound();
             var agent = intakeRegistry.ForProject(session.ProjectId);
             try
             {
@@ -96,8 +120,112 @@ public static class IntakeEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return Results.Conflict(new
+                {
+                    error = ex.Message
+                });
             }
+        });
+
+        app.MapPost("/api/intake/sessions/{id}/review-draft/{messageId:long}", async (
+            string id, long messageId, string? projectId, CancellationToken ct) =>
+        {
+            var session = await intakeStore.GetAsync(id, ct);
+            if (session is null || !MatchesProject(session, projectId))
+                return Results.NotFound();
+            try
+            {
+                return Results.Json(await intakeRegistry.ForProject(session.ProjectId).ImportLegacyDraftAsync(id, messageId, ct), DashboardJson.Options);
+            }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
+        app.MapGet("/api/intake/inbox", async (string projectId, string? cursor, CancellationToken ct) =>
+        {
+            if (initiatives is null) return Results.StatusCode(503);
+            try { return Results.Json(await initiatives.Proposals.ReadInboxAsync(projectId, cursor, ct), DashboardJson.Options); }
+            catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+        });
+        app.MapGet("/api/intake/proposals/{id}/revisions/{revision:int:min(1)}", async (string id, int revision,
+            string projectId, CancellationToken ct) =>
+        {
+            if (initiatives is null) return Results.StatusCode(503);
+            var snapshot = await initiatives.Proposals.ReadRevisionAsync(projectId, id, revision, ct);
+            return snapshot is null ? Results.NotFound() : Results.Json(snapshot, DashboardJson.Options);
+        });
+        app.MapGet("/api/intake/proposals", async (string projectId, string? sessionId, string? cursor, CancellationToken ct) =>
+        {
+            if (initiatives is null)
+                return Results.StatusCode(503);
+            var page = await initiatives.Proposals.ListAsync(projectId, ct, limit: 20, afterId: cursor, sessionId: sessionId);
+            return Results.Json(new
+            {
+                items = page,
+                nextCursor = page.Count == 20 ? page[^1].Id : null
+            }, DashboardJson.Options);
+        });
+        app.MapGet("/api/intake/proposals/{id}", async (string id, string projectId, CancellationToken ct) =>
+        {
+            if (initiatives is null)
+                return Results.StatusCode(503);
+            var proposal = await initiatives.Proposals.GetAsync(projectId, id, ct);
+            if (proposal is null)
+                return Results.NotFound();
+            var ingestion = proposal.ApprovedAt is null ? null : await initiatives.ReceiptAsync(projectId, id, proposal.Revision, ct);
+            return Results.Json(new
+            {
+                proposal,
+                ingestion
+            }, DashboardJson.Options);
+        });
+
+        app.MapPost("/api/intake/proposals/{id}/expand", async (string id, string projectId, CancellationToken ct) =>
+        {
+            if (initiatives is null)
+                return Results.StatusCode(503);
+            try
+            {
+                return Results.Json(new
+                {
+                    sessionId = await initiatives.Proposals.ExpandInIntakeAsync(projectId, id, ct)
+                });
+            }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
+        app.MapPost("/api/intake/proposals/{id}/approve", async (string id, string projectId, ApprovalRequest body, CancellationToken ct) =>
+        {
+            if (initiatives is null)
+                return Results.StatusCode(503);
+            if (body.Revision <= 0 || string.IsNullOrWhiteSpace(body.Hash))
+                return Results.BadRequest(new
+                {
+                    error = "Exact revision and content hash required."
+                });
+            try
+            {
+                return Results.Json(await initiatives.ApproveAsync(projectId, id, body.Revision, body.Hash, ct), DashboardJson.Options);
+            }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
+        app.MapPost("/api/intake/proposals/{id}/retry-refinement", async (string id, string projectId, ApprovalRequest body, CancellationToken ct) =>
+        {
+            if (initiatives is null)
+                return Results.StatusCode(503);
+            var proposal = await initiatives.Proposals.GetAsync(projectId, id, ct);
+            if (proposal is null)
+                return Results.NotFound();
+            if (proposal.Hash != body.Hash)
+                return Results.Conflict(new
+                {
+                    error = "Proposal content changed; reload before retry."
+                });
+            return await initiatives.RetryRefinementAsync(projectId, id, body.Revision, ct)
+                ? Results.Ok() : Results.Conflict(new
+                {
+                    error = "Only an explicitly failed refinement may be retried."
+                });
         });
 
         // List recent epics proposed via intake (issue.type='epic', assignee='intake').
@@ -107,6 +235,9 @@ public static class IntakeEndpoints
             return Results.Json(all.Select(ToIssueView).ToArray(), DashboardJson.Options);
         });
     }
+
+    private static bool MatchesProject(IntakeSessionRecord session, string? projectId) =>
+        projectId is null || string.Equals(session.ProjectId, projectId, StringComparison.OrdinalIgnoreCase);
 
     private static object ToSessionView(IntakeSessionRecord s) => new
     {
@@ -152,5 +283,6 @@ public static class IntakeEndpoints
     };
 
     private sealed record NewIntakeSessionRequest(string ProjectId, string? Title);
-    private sealed record SendMessageRequest(string Text);
+    private sealed record SendMessageRequest(string Text, string? ProposalId = null, int? Revision = null);
+    private sealed record ApprovalRequest(int Revision, string Hash);
 }

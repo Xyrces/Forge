@@ -53,6 +53,19 @@ public sealed class PlanLlmReviewGate : IRunGate
                the listed files)?
             4. Is the "done" evidence concrete and checkable?
 
+            ## Enforced role boundary
+            {{RoleAgentRegistry.DescribeTerritory(ctx.RoleName, ctx.TerritoryPrefixes, ctx.TerritoryAllowsRootFiles)}}
+            Never request forbidden file edits or wider territory. If an explicit task deliverable conflicts
+            with this boundary, return REVISE and identify an assignment conflict requiring an authorized
+            owner/operator clarification; do not silently waive the deliverable, accept a substitute
+            destination, or repeatedly prescribe the prohibited edit.
+            This is a pre-implementation plan: require concrete planned commands/checks and honest eventual
+            evidence, not already-passing results for changes that have not been made. Worker test results
+            and pending operator handoffs belong in the run transcript unless a repository deliverable is
+            explicitly required. A transcript does not replace that required document. Actual visual and
+            running-image qualification/final acceptance remain operator-owned; do not demand fabricated
+            observations or treat pending operator evidence as a failed pre-implementation code check.
+
             Reply with 2-6 sentences of feedback, then a final line EXACTLY one of:
             VERDICT: APPROVE
             VERDICT: REVISE

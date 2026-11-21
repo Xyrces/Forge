@@ -5,10 +5,7 @@ using Microsoft.Extensions.Logging;
 namespace Forge.Dashboard;
 
 /// <summary>
-/// P0.5: HTTP endpoints for the vision store. The dashboard's
-/// Vision tab fetches <c>GET /api/vision</c> on load and after the
-/// "Refresh" button; the JSON response carries the loaded content
-/// + metadata.
+/// Exposes each project's vision as a source document and a conversational map.
 /// </summary>
 public static class VisionEndpoints
 {
@@ -18,131 +15,98 @@ public static class VisionEndpoints
         ILogger logger,
         Core.MemoryStore? memory = null,
         Core.IIssueStore? issues = null,
-        Projects.ProjectContextFactory? projectContexts = null)
+        Projects.ProjectContextFactory? projectContexts = null,
+        Core.IVisionConversation? conversation = null)
     {
-        // Project lens (operator rule: everything but /now is
-        // per-project): ?projectId= resolves the vision from THAT
-        // project's root + memory key vision/<projectId>; unscoped
-        // keeps the legacy primary-project behavior.
-        (bool Found, string? Root, Core.IIssueStore Store, string VisionKey) Resolve(string? projectId)
+        var documents = new ProjectVisionDocuments(vision, projectContexts, memory);
+        static IResult Snapshot(VisionSnapshot snap, bool scoped) => Results.Json(new
         {
-            if (projectId is null || projectContexts is null)
-                return (projectId is null, null, issues!, "vision/master");
-            var pctx = projectContexts.Find(projectId);
-            return pctx is null
-                ? (false, null, issues!, "vision/master")
-                : (true, pctx.Options.Root, pctx.Issues, $"vision/{projectId}");
+            exists = snap.Exists, path = snap.Path, content = snap.Exists || !scoped ? snap.Content : null,
+            lastModified = snap.LastModifiedUtc
+        });
+
+        async Task<IResult> InProject(string? id, Func<ProjectVisionFile, Task<IResult>> action)
+        {
+            try
+            {
+                var file = documents.Find(id);
+                return file is null ? Results.NotFound(new { error = "Project not found.", projectId = id }) : await action(file);
+            }
+            catch (VisionRevisionConflict ex) { return Results.Conflict(new { error = ex.Message }); }
+            catch (VisionPathError ex) { return Results.Conflict(new { error = ex.Message }); }
+            catch (VisionMemoryPending ex)
+            {
+                logger.LogError(ex.InnerException, "Agent guidance synchronization failed after vision save for {Project}", id);
+                return Results.Json(new { error = ex.Message, code = "vision_memory_sync_pending" }, statusCode: 503);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogError(ex, "Vision document access failed for {Project}", id);
+                return Results.Json(new { error = "Forge could not access this project's vision file. Check the project checkout." }, statusCode: 503);
+            }
         }
 
-        app.MapGet("/api/vision", (string? projectId) =>
-        {
-            if (projectId is null || projectContexts is null)
-            {
-                var snap = vision.Get();
-                return Results.Json(new
-                {
-                    exists = snap.Exists,
-                    path = snap.Path,
-                    content = snap.Content,
-                    lastModified = snap.LastModifiedUtc,
-                });
-            }
-            var r = Resolve(projectId);
-            if (!r.Found) return Results.NotFound(new { error = "project not found", projectId });
-            var file = Path.Combine(r.Root!, vision.RelativePath);
-            if (!File.Exists(file))
-            {
-                return Results.Json(new { exists = false, path = file, content = (string?)null, lastModified = (DateTime?)null });
-            }
-            var content = File.ReadAllText(file);
-            return Results.Json(new
-            {
-                exists = true,
-                path = file,
-                content,
-                lastModified = (DateTime?)File.GetLastWriteTimeUtc(file),
-            });
-        });
+        app.MapGet("/api/vision", (string? projectId, CancellationToken ct) => projectId is null && projectContexts is null
+            ? Task.FromResult(Snapshot(vision.Get(), false))
+            : InProject(projectId, async file => Snapshot(await documents.ReadAsync(file, ct), projectId is not null)));
+        app.MapPost("/api/vision/refresh", (string? projectId, CancellationToken ct) =>
+            InProject(projectId, async file => Snapshot(await documents.RefreshAsync(file, ct), projectId is not null)));
+        app.MapPut("/api/vision", (VisionUpdate update, string? projectId, CancellationToken ct) =>
+            InProject(projectId, async file => Snapshot(await documents.SaveAsync(file, update.BaseRevision, _ => update.Content ?? "", ct), projectId is not null)));
 
-        app.MapPost("/api/vision/refresh", async (string? projectId, CancellationToken ct) =>
-        {
-            if (projectId is not null && projectContexts is not null)
-            {
-                var r = Resolve(projectId);
-                if (!r.Found) return Results.NotFound(new { error = "project not found", projectId });
-                var file = Path.Combine(r.Root!, vision.RelativePath);
-                var exists = File.Exists(file);
-                var content = exists ? File.ReadAllText(file) : null;
-                logger.LogInformation("Vision refreshed (project={Project}): exists={Exists} path={Path}", projectId, exists, file);
-                if (memory is not null && exists)
-                    await memory.RememberAsync(r.VisionKey, content!, ttlDays: null, ct);
-                return Results.Json(new
-                {
-                    exists,
-                    path = file,
-                    content,
-                    lastModified = exists ? (DateTime?)File.GetLastWriteTimeUtc(file) : null,
-                });
-            }
-            var snap = vision.Reload();
-            logger.LogInformation("Vision refreshed: exists={Exists} path={Path}", snap.Exists, snap.Path);
-            // Keep the prompt-injection key in step with the file —
-            // this is also the "doc landed via PR merge + project
-            // sync" path, so refresh must re-inject, not just re-read.
-            if (memory is not null && snap.Exists)
-                await memory.RememberAsync("vision/master", snap.Content, ttlDays: null, ct);
-            return Results.Json(new
-            {
-                exists = snap.Exists,
-                path = snap.Path,
-                content = snap.Content,
-                lastModified = snap.LastModifiedUtc,
-            });
-        });
+        var group = app.MapGroup("/api/projects/{projectId}/vision");
+        group.MapGet("/map", (string projectId, CancellationToken ct) => InProject(projectId, async file =>
+            Results.Ok(Core.VisionMap.Parse((await documents.ReadAsync(file, ct)).Content))));
+        group.MapGet("/repository", (string projectId) => InProject(projectId, file =>
+            Task.FromResult(Snapshot(ProjectVisionDocuments.ReadRepository(file), true))));
 
-        // Dashboard editor save path. Writes the file (creating it
-        // if missing) and refreshes the vision/<projectId> memory key
-        // so subsequent agent runs see the new vision immediately.
-        app.MapPut("/api/vision", async (VisionUpdate update, string? projectId, CancellationToken ct) =>
+        group.MapPost("/chat", (string projectId, VisionChatRequest request, CancellationToken ct) => InProject(projectId, async file =>
         {
-            if (projectId is not null && projectContexts is not null)
+            if (request.Messages is not { Count: > 0 } || request.Pending is null
+                || request.Messages.Any(m => m is null || m.Role is not ("user" or "assistant") || string.IsNullOrWhiteSpace(m.Text))
+                || request.Messages[^1].Role != "user" || request.Pending.Any(e => e is null))
+                return Results.BadRequest(new { error = "Provide the conversation ending in your message and the current draft." });
+            var map = Core.VisionMap.Parse((await documents.ReadAsync(file, ct)).Content);
+            if (map.Revision != request.BaseRevision) throw new VisionRevisionConflict();
+            if (conversation is null) return Results.Json(new { error = "The vision editor's model is unavailable." }, statusCode: 503);
+            try { if (request.Pending.Count > 0) Core.VisionMap.Apply(map.Source, map.Revision, request.Pending); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(new { error = ex.Message }); }
+            try
             {
-                var r = Resolve(projectId);
-                if (!r.Found) return Results.NotFound(new { error = "project not found", projectId });
-                var file = Path.Combine(r.Root!, vision.RelativePath);
-                Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-                File.WriteAllText(file, update.Content ?? "");
-                logger.LogInformation("Vision saved (project={Project}): {Path} ({Len} chars)", projectId, file, (update.Content ?? "").Length);
-                if (memory is not null)
-                    await memory.RememberAsync(r.VisionKey, update.Content ?? "", ttlDays: null, ct);
-                return Results.Json(new
-                {
-                    exists = true,
-                    path = file,
-                    content = update.Content ?? "",
-                    lastModified = (DateTime?)File.GetLastWriteTimeUtc(file),
-                });
+                var reply = await conversation.ReplyAsync(file.ProjectId!, map, request.Messages, request.Pending, ct);
+                if ((await documents.ReadAsync(file, ct)).Content != map.Source) throw new VisionRevisionConflict();
+                return Results.Ok(reply);
             }
-            var snap = vision.Write(update.Content ?? "");
-            logger.LogInformation("Vision saved: {Path} ({Len} chars)", snap.Path, snap.Content.Length);
-            if (memory is not null && snap.Exists)
-                await memory.RememberAsync("vision/master", snap.Content, ttlDays: null, ct);
-            return Results.Json(new
+            catch (Core.Control.BudgetAdmissionDeniedException ex) { return Results.Json(new { error = ex.Message }, statusCode: 429); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (VisionRevisionConflict) { throw; }
+            catch (Exception ex)
             {
-                exists = snap.Exists,
-                path = snap.Path,
-                content = snap.Content,
-                lastModified = snap.LastModifiedUtc,
-            });
-        });
+                logger.LogWarning(ex, "Vision conversation failed for {Project}", projectId);
+                return Results.Json(new { error = "The vision editor could not complete this turn. Your draft is available to retry." }, statusCode: 502);
+            }
+        }));
 
-        if (issues is not null)
+        group.MapPost("/apply", (string projectId, VisionApplyRequest request, CancellationToken ct) => InProject(projectId, async file =>
         {
-            MapDraftRequest(app, issues, logger, projectContexts);
-        }
+            if (string.IsNullOrWhiteSpace(request.BaseRevision) || request.Edits is not { Count: > 0 } || request.Edits.Any(e => e is null))
+                return Results.BadRequest(new { error = "Provide a source revision and at least one proposed change." });
+            try
+            {
+                var saved = await documents.SaveAsync(file, request.BaseRevision,
+                    source => Core.VisionMap.Apply(source, request.BaseRevision, request.Edits), ct);
+                return Results.Ok(Core.VisionMap.Parse(saved.Content));
+            }
+            catch (InvalidOperationException ex) { return Results.BadRequest(new { error = ex.Message }); }
+        }));
+
+        if (issues is not null) MapDraftRequest(app, issues, logger, projectContexts);
     }
 
-    public sealed record VisionUpdate(string? Content);
+    public sealed record VisionUpdate(string? Content, string? BaseRevision = null);
+    public sealed record VisionChatRequest(string BaseRevision, IReadOnlyList<Core.VisionChatMessage> Messages,
+        IReadOnlyList<Core.VisionMapEdit> Pending);
+    public sealed record VisionApplyRequest(string BaseRevision, IReadOnlyList<Core.VisionMapEdit> Edits);
 
     /// <summary>
     /// "Draft from codebase": enqueues an ad-hoc task asking an

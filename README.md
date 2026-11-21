@@ -1,245 +1,112 @@
 # Forge
 
-A long-lived .NET 10 orchestrator that drives AI coding agents against any registered git project. Forge owns the task queue, sprint assembly, git worktrees, the GitHub PR lifecycle, and the review-gated merge — **the model owns the code.**
+Forge is a self-hosted tool for developing software with AI agents. You describe a change, work out what counts as done, and approve the brief. Forge plans a sprint, assigns the work, and follows the pull requests through testing, review, and delivery. You can open the sprint board at any point to see where things stand or ask to review a change yourself.
 
-Forge is project-agnostic. Projects live in a DB-backed registry (the `project` table) and are added through the dashboard or the API — there is no hardcoded target repo in the codebase. Forge now builds itself: the `forge` project is registered like any other and its tasks dispatch against this repo.
+We use Forge on its own repository. One sprint started with a 404 in the browser console. The dashboard was loading a tool that only developers needed. We wanted to keep it available in development and stop requesting it in production. The review caught an unrelated test edit. When the task got stuck, we put it back in the queue. The fix merged on the original pull request. You can follow the [actual review and correction](docs/workflow-audit/pr150-history.md#review-decisions-and-revisions).
 
-The runtime uses the [Microsoft Agent Framework](https://learn.microsoft.com/agent-framework/overview/agent-framework-overview) 1.12.0 with [`Microsoft.Agents.AI.Workflows`](https://www.nuget.org/packages/Microsoft.Agents.AI.Workflows) for the dispatch pipeline. LLM inference goes through configurable OpenAI-compatible or Anthropic-protocol providers (kilo gateway, MiniMax direct, Kimi, …) with per-role provider/model assignments and per-project overrides.
+## Installation quickstart
 
-```
-Forge (.NET orchestrator, long-lived)
-├── IssueStore / MemoryStore     task queue + dep graph + sprints + memory (SQLite or Azure SQL)
-├── IssuesJsonlMirror            background tail -f mirror of the issue store
-├── GitWorktreeService           per-task `git worktree add` lifecycle
-├── GitHubService                PR open / status polling / merge
-├── OrchestratorAgent            dispatch loop → 5-stage MAF workflow per task
-├── SprintAssembler              completes Active sprint, assembles + activates the next (5-min tick)
-├── MafAgentRunner               MAF ChatClientAgent + bash AIFunction + secret env injection
-├── PRWatcher                    state-driven PR sweep: CI + review gate, rework rounds, merge
-├── SlotTable                    per-(project, role) concurrency semaphores
-└── DashboardHost                http://127.0.0.1:4097 (Kestrel + Blazor Server UI, Fluxor state)
+This installs Forge on one Linux host and gives you a private dashboard with Forge registered as its first project. The starter configuration keeps paid model calls disabled while you check the installation.
 
-External
-├── LLM providers (HTTPS)        OpenAI-compatible or Anthropic-protocol endpoints
-└── GitHub.com                   PRs, check runs, reviews, merges
-```
+### 1. Prepare the host and database
 
-## Prerequisites
+Use an x86-64 Linux host with systemd, Bash, Python 3, Git, `jq`, and a regular login with sudo access. The installer can set up K3s with embedded etcd. You can also use an existing single-node K3s installation with embedded etcd. The host needs network access to GitHub, GHCR, and your Azure SQL database.
 
-1. **.NET 10 SDK** — `dotnet --version` should print `10.0.x`.
-2. **At least one LLM provider key** — e.g. a kilo gateway JWT (see [`install-kilo.md`](install-kilo.md)), a MiniMax Token Plan key, or a Kimi key. Any endpoint speaking OpenAI chat-completions or Anthropic Messages works.
-3. **GitHub PAT** with `repo` scope on each target repo — stored per project as the `github_token` secret (encrypted at rest); a global `GITHUB_TOKEN` is the fallback.
-4. **Git** with worktree support.
-
-## Build
+Start in a fresh checkout. Keep the installation files outside it.
 
 ```bash
-dotnet build Forge.sln
+git clone https://github.com/Xyrces/Forge.git
+cd Forge
+umask 077
+forge_setup="$HOME/.config/forge-install"
+install -d -m 700 "$forge_setup"
+if [[ ! -e "$forge_setup/appsettings.json" ]]; then
+  install -m 600 deploy/k3s/appsettings.first-install.json "$forge_setup/appsettings.json"
+fi
 ```
 
-`TreatWarningsAsErrors=true`; clean build expected.
+Have a database administrator prepare an empty Azure SQL database and three users in it. The initializer needs permission to create schemas and grant access. The controller and workers use separate runtime accounts. Set the two runtime user names in your private `appsettings.json` to match the database. The sample sets a $25 spending ceiling with paid calls switched off. Choose the ceiling you want recorded for this new installation.
 
-## Test
+Put these files in `$forge_setup` before continuing. The [private file examples and SQL permissions](deploy/k3s/README.md#prepare-the-private-install-files) show the expected formats.
+
+| Files | What goes in them |
+| --- | --- |
+| `sql-controller.txt`, `sql-initialize.txt`, `sql-worker.txt` | One connection string per file, all pointing to the same database, each using its own account. |
+| `worker-packages.json` | A GitHub username and token with read access to the private Talaria packages used in worker builds. |
+| `registry.json` | Docker-format registry credentials with read access to the Forge image in GHCR. |
+
+### 2. Select a release and preview the install
+
+Open a successful **Build immutable Forge controller image** run for the reviewed commit on `main`. Download its **forge-image-receipt** artifact and extract `forge-image-receipt.json` into `$forge_setup`. The receipt identifies the exact code revision and container image tested together. [Controller image builds](https://github.com/Xyrces/Forge/actions/workflows/controller-image.yml?query=branch%3Amain)
+
+In the same Bash session, switch the installer to that revision and create a dataset ID. Keep the ID file for retries and future releases on this installation.
 
 ```bash
-dotnet test Forge.sln
+receipt="$forge_setup/forge-image-receipt.json"
+git switch --detach "$(jq -er .sourceSha "$receipt")"
+if [[ ! -e "$forge_setup/dataset-id" ]]; then
+  python3 -c 'import uuid; print(uuid.uuid4())' > "$forge_setup/dataset-id"
+fi
 ```
 
-Current suite: **1,200+ passing** (xUnit, hand-rolled fakes — no mocking frameworks; real-LLM tests are gated on configured provider keys). Highlights:
+Define the install command once so the preview and apply use the same inputs. The K3s version and checksum below match the Linux host running Forge. If K3s is already installed, the installer checks the existing cluster. [K3s release and checksums](https://github.com/k3s-io/k3s/releases/tag/v1.37.2%2Bk3s1)
 
-- `IssueStoreTests`, `IssueDepTests`, `IssuesJsonlMirrorTests` — store + dep graph + mirror
-- `MemoryStoreTests`, `MemoryEndpointTests` — memory table + HTTP
-- `BashToolTests`, `MafAgentRunnerBashToolTests` — MAF tool-call plumbing
-- `ClaimExecutorTests` → `EnqueueWatchExecutorTests` — workflow executors
-- `EngineeringDispatchWorkflowTests` — end-to-end workflow against a real temp git repo
-- `OrchestratorAgentTests`, `PRWatcherTests`, `SprintAssemblerTests`, `ShellMutationClassifierTests` — integration
-
-## Configuration
-
-Copy `appsettings.example.json` to `appsettings.json` and fill in (gitignored). Top-level sections:
-
-```jsonc
-{
-  "llm": {
-    "defaultProvider": "kilo-gateway",
-    "providers": [
-      {
-        "name": "kilo-gateway",
-        "baseUrl": "https://api.kilo.ai/api/gateway",
-        "apiKey": "KILO_GATEWAY_API_KEY",
-        "defaultModel": "minimax/minimax-m3"
-      }
-      // Anthropic-protocol providers (Kimi, MiniMax direct, ...) add:
-      //   "api": "anthropic", "auth": "bearer", "sharedQuota": true,
-      //   "maxOutputTokens": 8192, "contextWindowTokens": 900000, "modelsUrl": "..."
-    ],
-    "overloadRetryCount": 3,
-    "roles": {
-      "CoreDev":   { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
-      "ClientDev": { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
-      "QA":        { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
-      "Reviewer":  { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
-      "Intake":    { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" }
-    }
-  },
-  "github":    { "owner": "...", "repo": "...", "token": "GITHUB_TOKEN" },  // fallback only; per-project github_token secret wins
-  "workspace": { "worktreeRoot": ".portHorizon/worktrees", "defaultBranch": "main" },
-  "db":        { "provider": "sqlite" },  // or "sqlserver" + db.connectionString (Azure SQL)
-  "spawner":   { "maxConcurrentSessions": 4, "pollIntervalSeconds": 3, "staleMinutes": 30 },
-  "orchestrator": { "execution": "InProcess" },  // or "Durable" + dtsConnectionString
-  "messaging":  { "transport": "inmemory" },     // internal event bus (Talaria); "servicebus" reserved
-  "dashboard": { "enabled": true, "port": 4097, "hostname": "127.0.0.1" }
+```bash
+forge_install() {
+  python3 deploy/k3s/install.py \
+    --image "$(jq -er .imageDigest "$receipt")" \
+    --source-sha "$(git rev-parse HEAD)" --image-receipt "$receipt" \
+    --dataset "$(cat "$forge_setup/dataset-id")" --operation first-install \
+    --sql-file "$forge_setup/sql-controller.txt" \
+    --initialize-sql-file "$forge_setup/sql-initialize.txt" \
+    --worker-sql-file "$forge_setup/sql-worker.txt" \
+    --worker-packages-file "$forge_setup/worker-packages.json" \
+    --registry-config "$forge_setup/registry.json" \
+    --config "$forge_setup/appsettings.json" \
+    --k3s-version 'v1.37.2+k3s1' \
+    --k3s-sha256 '265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda' \
+    "$@"
 }
+forge_install
 ```
 
-Notes:
+Look for `"mode": "plan"`, namespace `forge`, and the source revision you chose. This checks the local inputs and their match to the receipt. The image pull and database connection happen when you apply the plan.
 
-- **Projects are DB-registered, not config-registered.** The `appsettings.json` `projects[]` array is deprecated and ignored at boot. Add projects via the dashboard **Projects** page or `POST /api/projects`; the registry row owns the repo URL, local clone path, default branch, and per-project role caps (`roles_json`).
-- **Role model resolution order:** live DB override (`PUT /api/agents/roles/{name}/model`, project-scoped) → `llm.roles` config → provider default. Overrides apply without restart.
-- Environment variables override any field (use `__` for nested keys), e.g. `GITHUB_TOKEN`, `Workspace__Root`, `db__connectionString`.
+### 3. Install and open the dashboard
 
-## CLI
+On the Linux host, apply the plan. After **Release completed**, the second command prints the private address of the Forge service.
 
 ```bash
-# Long-running orchestrator + dashboard
-dotnet run --project Forge
-
-# Pre-flight: config + DB schemas + GitHub + LLM auth (exits non-zero on failure)
-dotnet run --project Forge -- --check
-
-# Print queue summary and exit
-dotnet run --project Forge -- --status
-
-# One dispatch cycle, then exit (cron / trigger-driven)
-dotnet run --project Forge -- --once
-
-# Dashboard only — host the UI without dispatching
-dotnet run --project Forge -- --dashboard-only
-
-# Dry-run recovery: see what StartupRecovery would do (no side-effects)
-dotnet run --project Forge -- --recover
-
-# Replay unfinished side-effects, then start dispatch
-dotnet run --project Forge -- --recover-and-start
-
-# Enqueue a task
-dotnet run --project Forge -- \
-  --enqueue-task "Add Position ECS component" \
-  --task-type ecs --task-desc "..." --branch "agent/positions" [--task-id task-123]
-
-# Worktree lifecycle smoke test against a real repo
-dotnet run --project Forge -- --worktree-smoke
-
-# One-shot SQLite -> Azure SQL state migration (stop the service first)
-dotnet run --project Forge -- \
-  --migrate-db --target sqlserver \
-  --connection-string "Server=tcp:...;Initial Catalog=...;Authentication=Active Directory Default;" \
-  [--include-open-work] [--reset]
-
-# Provision the contained DB user (db_owner) for the forge-mi managed identity (idempotent)
-dotnet run --project Forge -- --init-azure-sql [--mi-name forge-mi]
-
-# Any mode accepts --config <path> to point at a specific appsettings file
-dotnet run --project Forge -- --config /etc/forge/appsettings.json --check
+forge_install --apply &&
+  sudo /usr/local/bin/k3s kubectl -n forge get svc forge -o jsonpath='{.spec.clusterIP}{"\n"}'
 ```
 
-See `docs/azure-sql-cutover.md` for the Azure SQL migration runbook.
+On **your workstation**, replace `FORGE_SERVICE_IP` with that address and `your-user@your-linux-host` with your SSH login. Your SSH account needs permission to forward to that service on port 8080. Leave this terminal open while you use the dashboard.
 
-## Dashboard
-
-The orchestrator hosts a Blazor Server UI (Fluxor state management, SSE live updates) on `http://127.0.0.1:4097` (configurable via `dashboard.*`; optional multi-endpoint HTTP/HTTPS Kestrel binding is supported).
-
-Pages (grouped as in the nav):
-
-| Area | Pages |
-|---|---|
-| Overview | `/` Home, `/now` (unified cross-project admin view + alert inbox) |
-| Planning | `/intake`, `/vision`, `/specs`, `/designs`, `/art`, `/backlog` |
-| Execution | `/sprints`, `/tasks`, `/flow` (pipeline DAG + workflow edit mode), `/runs`, `/board` |
-| Projects | `/projects`, `/projects/{id}/overview`, `/projects/{id}/secrets` |
-| Operations | `/deployments`, `/agents` (agent control surface), `/skills`, `/ops/gates`, `/ops/recovery`, `/ops/cost`, `/ops/memory` |
-
-The API surface includes `/api/state`, `/api/tasks/*`, `/api/sprints/*` (incl. propose/commit), `/api/gates*`, `/api/projects/*`, `/api/agents/*`, `/api/skills`, `/api/specs/*`, `/api/memory`, `/api/intake/*`, `/api/flow*`, `/api/workflow*` (draft/publish), `/api/agent-runs`, `/api/cost/*`, `/api/recovery/*`, `/api/events` (SSE), `/api/issues.jsonl`, plus health/meta endpoints. `GET /api/meta/endpoints` lists the live route table.
-
-## How a task flows
-
-1. **Intake.** New work enters as an epic via the Intake agent (operator chat at `/intake`) or as an ad-hoc task (CLI / dashboard / agent-filed follow-up).
-2. **Grooming.** The pipeline schedulers (designer → groomer) refine specs into stories/tasks, kicked by spec/follow-up events with a 15-min backstop tick. Ad-hoc tasks must be marked `groomed=true` by the ScheduledGroomer before they are sprint-eligible.
-3. **Sprint.** ALL engineering work happens inside a sprint. The `SprintAssembler` (kicked by task/sprint events, 15-min backstop) completes the Active sprint when its tasks are terminal and assembles + activates the next from eligible Pending tasks. There is deliberately no UI button to create sprints.
-4. **Dispatch.** The orchestrator claims a ready sprint task (`IssueStore.ClaimAsync` is atomic), acquires a per-(project, role) slot from `SlotTable`, and hands it to the 5-stage MAF workflow: **Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch**.
-5. **Plan gate.** Before mutating, CoreDev/ClientDev runs must `submit_plan`; the bash tool refuses classified-mutating commands until deterministic gates (schema, territory) and the LLM plan-critic approve.
-6. **Run.** `MafAgentRunner` builds the prompt (role instructions + memory recall + sprint context + task), injects per-project secrets as env vars (by reference — values never enter LLM context), and runs the MAF agent loop with the bash tool.
-7. **PR.** The orchestrator commits, pushes `agent/<id>`, and opens the PR. Agents never open PRs themselves.
-8. **Watch.** No separate watch row: the task IS the watch. `PrOpened` launches the review immediately, a recorded verdict triggers the merge attempt now, and the sweep (every 15 min, `SweepTick(watch)`) polls every live task with a `prNumber` as the backstop. Merge requires green check runs AND an approval (formal review or reviewer-agent verdict) at the current head SHA. CI failure or changes-requested requeues the task for a rework round on the same branch/PR — circuit breaker at 3 attempts, then the task goes Blocked/Failed for the operator.
-9. **Merge.** On green CI + approval (and with the `merge` stage gate released), the watcher merges, deletes the branch, removes the worktree, and marks the task Completed. Externally-merged PRs are detected too.
-10. **Restart safety.** `StartupRecovery` runs at every startup, classifies every `InProgress + assignee=forge` issue by its `dispatch_checkpoint`, and replays unfinished side-effects (commit / push / PR open). Use `--recover` to dry-run. Opt-in P4 Stage B persists workflow state in a Durable Task Scheduler sidecar (`orchestrator.execution=Durable`). See `docs/p4-restart-safety.md`.
-
-Optional: a dependency graph exists in `IssueStore` (`blocks` / `related` / `duplicates` edges). `ReadyAsync` excludes issues with an open `blocks` edge. `Failed` blockers are **not** auto-cleared — the operator must explicitly close them or remove the edge.
-
-## Role agents
-
-Nine slot pools, configured in `Agents/RoleAgentRegistry.cs`:
-
-| Role | Territory | Tools | Purpose |
-|---|---|---|---|
-| `CoreDev`   | project backend dirs  | bash, read, edit, grep, glob, webfetch | Core engineering |
-| `ClientDev` | project client/UI dirs | bash, read, edit, grep, glob, webfetch | Client/UI engineering |
-| `QA`        | (read-only)            | bash, read, grep, glob | Build + test verification, no edits |
-| `Reviewer`  | (read-only)            | read, grep, glob, webfetch | Architecture-compliance review on PRs |
-| `Intake`    | (pipeline)             | chat + tool emits | operator inbox → proposed epic |
-| `Designer`  | (pipeline)             | scheduler-side | spec → design |
-| `Artist`    | (pipeline)             | scheduler-side | art/asset generation |
-| `Groomer`   | (pipeline)             | scheduler-side | spec → stories/tasks; ad-hoc grooming |
-| `Orchestrator` | (pipeline)          | no LLM | dispatch bookkeeping |
-
-Role prompts resolve per project: `<projectRoot>/agents/<role>.md` wins (the project ships its own role instructions); otherwise the built-in copies next to the app are used. Engineering concurrency is per-role (default caps: coredev/clientdev/reviewer=2, others=1; live-tunable via `PUT /api/projects/{id}/roles`).
-
-## State files
-
-All persisted state lives under the project state root (`.portHorizon/state/` for the default project; `<dataRoot>/projects/{id}/.forge/state/` for registered projects; `/var/lib/forge/state/` under systemd):
-
-```
-state/
-├── issues.db                 # IssueStore family (schema v31): tasks, deps, sprints, secrets, skills, agent runs
-├── issues.jsonl              # IssuesJsonlMirror tail -f mirror (regenerated every 5s)
-├── memory.db                 # MemoryStore
-└── orchestrator-state.json   # heartbeat + counters (schema v3)
+```sh
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:4097:FORGE_SERVICE_IP:8080 your-user@your-linux-host
 ```
 
-With `db.provider=sqlserver`, issue/memory data lives in Azure SQL instead (fresh-created at the current schema); the JSONL mirror still writes locally. The SQLite path migrates automatically on startup (`schema_version` row + migration chain); the orchestrator refuses to start on corrupt state or an unknown schema version.
+Open `http://127.0.0.1:4097` in your browser. You should see **Forge** in the project selector. At `http://127.0.0.1:4097/api/meta/buildinfo`, compare `sourceRevision` with `sourceSha` in your receipt. When they match, you’re looking at the release you installed.
 
-## Logs
+If you’re using a browser **on the Linux host itself**, run `sudo /usr/local/bin/k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080` and open `http://127.0.0.1:8080` there.
 
-Structured single-line console logs (`journalctl -u forge -f` under systemd). Per-run agent diagnostics land in `<dataRoot>/logs/agent.log` (message roles, tool-call names, text lengths) — the first stop when a run "completes" with no diff. Set `Logging__LogLevel__Default=Debug` for verbose output (raw LLM requests, executor trace).
+The starter lets you explore the dashboard with the workflow gates held. Intake uses canned replies until a controller starts with a configured model key. To run real work, prepare the provider credentials, spending policy, and repository access, then restart the controller with the updated configuration before opening the gates. [Configuration and credential setup](deploy/k3s/README.md#prepare-the-private-install-files)
 
-## Operational notes
+## How Forge works
 
-- **Cross-process safety.** Run only one orchestrator per state directory. SQLite WAL allows concurrent readers; a second writer waits on the busy-timeout.
-- **Concurrency.** Dev dispatch is bounded per (project, role) by `SlotTable`; `spawner.maxConcurrentSessions` no longer gates dev dispatch. A shared process-wide rate-limit tracker cools a provider+model for ALL subsystems on a 429, and a per-provider semaphore (`llm.maxConcurrentRequests`, default 2) caps simultaneous round-trips.
-- **Stage gates.** Optional operator hold/release at four automatic transitions — `design`, `groom`, `sprint` (assembly only), `merge` — via `GET/POST /api/gates*` or the `/ops/gates` page. A held stage skips its scheduler tick; a held merge leaves the watch live.
-- **Retries.** `StartupRecovery` replays unfinished side-effects at startup; after `MaxAttempts` (default 3) the issue is hard-failed. Inspect the audit row and run fresh sweeps from `/ops/recovery`.
-- **Memory.** Project memory is injected into every agent prompt under "## Project memory" (`POST /api/memory` or `/ops/memory`).
-- **Secrets.** Per-project encrypted secrets (`github_token`, `kilo_gateway_api_key`, custom kinds) are managed at `/projects/{id}/secrets` and injected by reference into agent bash env as `FORGE_SECRET_<KIND>`. Values never enter prompts, tool-call JSON, or logs.
-
-## Architecture
-
-The dispatch path is a MAF `WorkflowBuilder` graph in `Orchestrator/Workflow/EngineeringDispatchWorkflow.cs` — five typed `FunctionExecutor<TIn, TOut>` stages (Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch). `OrchestratorAgent` claims the task and hands it to an `IWorkflowDispatcher`: InProcess (default) or Durable (DTS sidecar). The editable workflow definition (`/flow?mode=edit`) controls wiring and policy — gates, auto-merge, rework limits, step toggles — resolved per evaluation without restart; the task state transition table stays code-owned.
-
-Module boundaries are non-negotiable: `Core/` has no I/O beyond the state DB, `Agents/` adds LLM + tools, `Orchestrator/` glues git + GitHub, `Messaging/` owns the internal event bus, `Dashboard/` + `Forge.UI/` render state. See `AGENTS.md` for the full rule layer and `docs/system-flow.md` for the narrative.
-
-**Internal messaging (Talaria).** Stores publish pure-record hint events after mutations commit (`Core/Messaging/` seam — no Talaria reference in Core); `Messaging/` maps them onto Talaria topics over the in-memory transport (Azure Service Bus reserved behind `messaging.transport`). Consumers in `Orchestrator/Consumers/` — one per topic — kick the dispatch loop and the scheduler loops via coalescing wakeup signals; the watch sweep and all scheduler loops keep a 15-minute backstop tick (`SweepTickPublisher`). Messages are hints, never truth: handlers re-read DB/GitHub and are idempotent, so a crash loses nothing the next backstop can't re-derive. GitHub remains the only polled external system.
+1. **Give the project direction.** Use the Vision Board to describe what you're building and the design choices you want future work to respect. You can refine the mind map in conversation as the project takes shape.
+2. **Agree on a change.** Start an idea in Intake. The conversation and working brief sit together so you can ask for a revision, see exactly what changed, and approve the version you want built.
+3. **Follow the sprint.** Forge turns the approved work into tasks and runs independent tasks in parallel when workers are available. Each card links to the work behind it. If a change needs your eyes, you can require a human review while the sprint is underway.
+4. **Decide where it ships.** Each project can choose its sprint deployment target. Forge itself closes the sprint when the release passes its deployment checks in the user acceptance testing (UAT) environment. From Deployments, you can pick that tested release and promote it to staging or production.
 
 ## Documentation
 
-- **Guides:** [`docs/user-guide.md`](docs/user-guide.md) (operating Forge day-to-day) · [`docs/administrator-guide.md`](docs/administrator-guide.md) (install, config, deployment, security, ops)
-- **Design & flow:** `docs/system-flow.md`, `docs/agent-framework-design.md`, `docs/embedded-issues.md`
-- **Runbooks:** `docs/operator-cookbook.md`, `docs/linux-deployment.md`, `docs/azure-sql-cutover.md`, `docs/p4-restart-safety.md`, `docs/ui-troubleshooting.md`
-- **Contributing:** `CONTRIBUTING.md`, `AGENTS.md`
-
-## Out of scope (deferred)
-
-- Per-task permission overrides beyond per-role
-- Webhook-based PR watching (currently a 15-min sweep)
-- Roslyn / NetArchTest architecture gates
-- MCP playtest harness
-- Godot headless smoke test
+| When you're ready to… | Read |
+| --- | --- |
+| Give Forge its first initiative | [Using Forge](docs/user-guide.md) |
+| Set up separate GitHub publisher and reviewer identities | [GitHub App setup](docs/github-app-identities.md) |
+| Configure model access, spending, or logs | [Runtime reference](docs/runtime-reference.md) |
+| Choose where a sprint deploys or promote a release | [Deployment environments](docs/deployment-environments.md) |
+| Build Forge and run the tests from source | [Contributor quickstart](docs/getting-started.md#build-and-test-the-code) |
+| Find architecture notes, runbooks, and design history | [Documentation index](docs/README.md) |

@@ -1,0 +1,74 @@
+@using System.Net.Http.Json
+@using System.Text.Json
+@using Forge.Dashboard.Features.Deployments
+@inject HttpClient Http
+@implements IDisposable
+
+@if (Enabled && CanRetry)
+{
+    <details class="release-evidence">
+        <summary>Retry delivery</summary>
+        <p>Retry this exact revision in <strong>@Release.EnvironmentName</strong>. Forge must verify that the previous attempt rolled back or never started before it can retry.</p>
+        <dl class="release-facts"><dt>Source revision</dt><dd><code>@Release.CommitSha</code></dd><dt>Immutable image</dt><dd><code>@Image</code></dd></dl>
+        <button class="btn btn--primary" disabled="@_busy" @onclick="RetryAsync">@(_busy ? "Requesting retry…" : "Confirm retry of this release")</button>
+    </details>
+}
+@if (Enabled && Release.Status is "Pending" or "BuildPassed")
+{
+    <details class="release-evidence">
+        <summary>Reject unstarted release</summary>
+        <p>Stop this deployment before it starts. This leaves the sprint's delivery requirement unresolved. You can retry the same verified release or explicitly stop the sprint outcome.</p>
+        <button class="btn btn--danger" disabled="@_busy" @onclick="RejectAsync">Confirm rejection</button>
+    </details>
+}
+@if (_error is not null) { <p class="banner banner--warn" role="alert">@_error</p> }
+@if (_notice is not null) { <p class="banner banner--ok" role="status">@_notice</p> }
+
+@code {
+    [Parameter, EditorRequired] public DeploymentRow Release { get; set; } = default!;
+    [Parameter] public bool Enabled { get; set; }
+    [Parameter] public EventCallback OnChanged { get; set; }
+    private CancellationTokenSource _request = new();
+    private string? _identity, _error, _notice;
+    private bool _busy;
+    private string? Image
+    {
+        get
+        {
+            try
+            {
+                using var receipt = JsonDocument.Parse(Release.ReceiptJson ?? "null");
+                return receipt.RootElement.ValueKind == JsonValueKind.Object && receipt.RootElement.TryGetProperty("imageDigest", out var image) ? image.GetString() : null;
+            }
+            catch (JsonException) { return null; }
+        }
+    }
+    private bool CanRetry => Release.EnvironmentName is not null && Release.CompletionId is not null && Release.Status is "DeployFailed" or "Rejected" && Image is not null;
+    protected override void OnParametersSet()
+    {
+        var identity = $"{Release.ProjectId}/{Release.Id}/{Release.Status}/{Enabled}";
+        if (_identity == identity) return;
+        _request.Cancel(); _request.Dispose(); _request = new(); _identity = identity; _busy = false; _error = null;
+    }
+    private Task RetryAsync() => MutateAsync("retry");
+    private Task RejectAsync() => MutateAsync("reject");
+    private async Task MutateAsync(string action)
+    {
+        if (_busy || !Enabled || action == "retry" && !CanRetry || action == "reject" && Release.Status is not ("Pending" or "BuildPassed")) return;
+        var ct = _request.Token; var release = Release;
+        _busy = true; _error = null; _notice = null;
+        try
+        {
+            var url = $"/api/deployments/{Uri.EscapeDataString(release.Id)}/{action}?projectId={Uri.EscapeDataString(release.ProjectId)}";
+            using var response = action == "retry" ? await Http.PostAsJsonAsync(url, new { expectedSourceSha = release.CommitSha, expectedImage = Image }, ct) : await Http.PostAsync(url, null, ct);
+            await EnvironmentPolicyClient.EnsureSuccessAsync(response, ct);
+            if (ct.IsCancellationRequested) return;
+            _notice = action == "retry" ? "Retry requested. The new attempt will appear in release history." : "Release rejected before deployment. Its sprint outcome remains explicit.";
+            await OnChanged.InvokeAsync();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex) { if (!ct.IsCancellationRequested) _error = ex.Message; }
+        finally { if (!ct.IsCancellationRequested) _busy = false; }
+    }
+    public void Dispose() { _request.Cancel(); _request.Dispose(); }
+}

@@ -16,12 +16,16 @@ public sealed class GitWorktreeService
     // GITHUB_TOKEN in its environment; git honors it for github.com
     // remote operations even with no credential helper present.
     private readonly string? _githubToken;
+    private readonly Func<Task<string?>>? _publisherToken;
+    private readonly string? _publisherRepository;
 
-    public GitWorktreeService(WorkspaceOptions options, ILogger<GitWorktreeService> logger, string? githubToken = null)
+    public GitWorktreeService(WorkspaceOptions options, ILogger<GitWorktreeService> logger, string? githubToken = null, Func<Task<string?>>? publisherToken = null, string? publisherRepository = null)
     {
         _options = options;
         _logger = logger;
         _githubToken = githubToken;
+        _publisherToken = publisherToken;
+        _publisherRepository = publisherRepository;
     }
 
     public string WorkspaceRoot => Path.GetFullPath(_options.Root);
@@ -31,13 +35,175 @@ public sealed class GitWorktreeService
     public string WorktreePathFor(string taskId)
         => Path.Combine(WorktreeRoot, Sanitize(taskId));
 
-    public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default, string? branchOverride = null)
+    /// <summary>New engineering runs start from an observed remote commit, never a stale local branch.</summary>
+    public async Task<string> CreateFreshAsync(string taskId, string baseBranch, CancellationToken ct = default, string? branchOverride = null)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2));
+        ct = timeout.Token;
+        if (Directory.Exists(WorktreePathFor(taskId)))
+            throw new InvalidOperationException("Existing work requires the explicit reuse path.");
+        if (string.IsNullOrWhiteSpace(baseBranch) || baseBranch.Contains('"') || baseBranch.Contains('\\')
+            || baseBranch.Any(char.IsWhiteSpace) || baseBranch.StartsWith('-'))
+            throw new InvalidOperationException("Invalid configured base branch.");
+        var valid = await RunGitInAsync(WorkspaceRoot, "", ct, ["check-ref-format", "refs/heads/" + baseBranch]);
+        if (valid.ExitCode != 0) throw new InvalidOperationException("Invalid configured base branch.");
+        var localRef = "refs/forge/fresh/" + Guid.NewGuid().ToString("N");
+        try
+        {
+            var fetch = await RunGitInAsync(WorkspaceRoot, "", ct, ["fetch", "--no-tags", "--no-write-fetch-head", "origin", $"+refs/heads/{baseBranch}:{localRef}"]);
+            if (fetch.ExitCode != 0)
+                throw new InvalidOperationException("Cannot fetch the configured base branch; refusing stale engineering checkout.");
+            var observed = await RunGitInAsync(WorkspaceRoot, "", ct, ["rev-parse", "--verify", localRef + "^{commit}"]);
+            var sha = observed.Stdout.Trim();
+            if (observed.ExitCode != 0 || !System.Text.RegularExpressions.Regex.IsMatch(sha, "^[0-9a-f]{40}$"))
+                throw new InvalidOperationException("Fetched base is not a verified commit.");
+            return await CreateAsync(taskId, sha, ct, branchOverride, preserveExistingBranch: true);
+        }
+        finally
+        {
+            try
+            {
+                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var deleted = await RunGitInAsync(WorkspaceRoot, "", cleanup.Token, ["update-ref", "-d", localRef]);
+                if (deleted.ExitCode != 0) _logger.LogWarning("Could not remove temporary source ref for {TaskId}", taskId);
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Temporary source ref cleanup failed for {TaskId}", taskId); }
+        }
+
+    }
+
+    public async Task<IReadOnlyList<string>> DefaultVerificationCommandsAtHeadAsync(string head, CancellationToken ct)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(head, "\\A[0-9a-f]{40}\\z"))
+            throw new InvalidOperationException("Default verification requires an exact source revision.");
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(TimeSpan.FromMinutes(2)); ct = bounded.Token;
+        var fetch = await RunGitInAsync(WorkspaceRoot, "", ct, ["fetch", "--no-tags", "--no-write-fetch-head", "origin", head]);
+        if (fetch.ExitCode != 0) throw new InvalidOperationException("Cannot fetch verification source profile.");
+        var tree = await RunGitInAsync(WorkspaceRoot, "", ct, ["ls-tree", "-z", "--format=%(objecttype)%x09%(path)", head]);
+        if (tree.ExitCode != 0) throw new InvalidOperationException("Cannot inspect exact source verification profile.");
+        return RunVerification.DefaultCommandsForRootFiles(tree.Stdout.Split('\0').Where(row => row.StartsWith("blob\t", StringComparison.Ordinal)).Select(row => row[5..]));
+    }
+
+    /// <summary>Prove a clean two-parent GitHub integration of the last published source with registered base history.</summary>
+    public async Task<(string Tree, string BaseParent)> VerifyCleanIntegrationAsync(string original, string head,
+        string originalTree, CancellationToken ct, string? observedMergeSha = null)
+    {
+        foreach (var sha in new[] { original, head, originalTree })
+            if (!System.Text.RegularExpressions.Regex.IsMatch(sha, "\\A[0-9a-f]{40}\\z"))
+                throw new InvalidOperationException("Integration evidence requires exact object IDs.");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2)); ct = timeout.Token;
+        async Task<string> Git(params string[] args)
+        {
+            var result = await RunGitInAsync(WorkspaceRoot, "", ct, args);
+            if (result.ExitCode != 0) throw new InvalidOperationException("Clean integration provenance could not be established.");
+            return result.Stdout.Trim();
+        }
+        await Git("fetch", "--no-tags", "--no-write-fetch-head", "origin", original, head);
+        if (await Git("rev-parse", original + "^{tree}") != originalTree)
+            throw new InvalidOperationException("Original publication tree does not match its receipt.");
+        var parents = (await Git("rev-list", "--parents", "-n", "1", head)).Split(' ');
+        if (parents.Length != 3 || parents[1] != original)
+            throw new InvalidOperationException("Current head is not a direct integration of the verified publication.");
+        var baseRef = "refs/forge/integration/" + Guid.NewGuid().ToString("N");
+        try
+        {
+            await Git("check-ref-format", "refs/heads/" + DefaultBranch);
+            await Git("fetch", "--no-tags", "--no-write-fetch-head", "origin", "+refs/heads/" + DefaultBranch + ":" + baseRef);
+            var acceptedBase = baseRef;
+            if (observedMergeSha is not null)
+            {
+                if (!System.Text.RegularExpressions.Regex.IsMatch(observedMergeSha, "\\A[0-9a-f]{40}\\z"))
+                    throw new InvalidOperationException("Merged integration requires an exact merge object.");
+                await Git("fetch", "--no-tags", "--no-write-fetch-head", "origin", observedMergeSha);
+                var mergeParents = (await Git("rev-list", "--parents", "-n", "1", observedMergeSha)).Split(' ');
+                if (mergeParents.Length != 3 || mergeParents[2] != head)
+                    throw new InvalidOperationException("Recorded merge does not integrate the exact verified PR head.");
+                await Git("merge-base", "--is-ancestor", observedMergeSha, baseRef);
+                acceptedBase = mergeParents[1]; // Never let the PR's own ancestry prove its historical base.
+            }
+            await Git("merge-base", "--is-ancestor", parents[2], acceptedBase);
+            var expected = (await Git("merge-tree", "--write-tree", original, parents[2])).Split('\n')[0];
+            var tree = await Git("rev-parse", head + "^{tree}");
+            if (tree != expected) throw new InvalidOperationException("Integration tree differs from the clean merge result.");
+            return (tree, parents[2]);
+        }
+        finally
+        {
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var removed = await RunGitInAsync(WorkspaceRoot, "", cleanup.Token, ["update-ref", "-d", baseRef]);
+            if (removed.ExitCode != 0) _logger.LogWarning("Could not retire integration source ref {Ref}", baseRef);
+        }
+    }
+
+    public string ReviewSnapshotPath(string taskId, string attemptId) => WorktreePathFor("review-" +
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(taskId + "\n" + attemptId))).ToLowerInvariant());
+
+    /// <summary>A separate, immutable review checkout; never moves or cleans engineering work.</summary>
+    public async Task<string> CreateReviewSnapshotAsync(string taskId, string attemptId, string headSha, CancellationToken ct = default)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(headSha, "\\A[0-9a-f]{40}\\z"))
+            throw new InvalidOperationException("Review source must be an exact commit SHA.");
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(TimeSpan.FromMinutes(2));
+        ct = bounded.Token;
+        var identity = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            Encoding.UTF8.GetBytes(taskId + "\n" + attemptId))).ToLowerInvariant();
+        var path = WorktreePathFor("review-" + identity);
+        if (Directory.Exists(path) || File.Exists(path))
+            throw new InvalidOperationException("Review snapshot already exists without an adopted worker; refusing to overwrite it.");
+        Directory.CreateDirectory(WorktreeRoot);
+        var fetched = await RunGitInAsync(WorkspaceRoot, "", ct,
+            ["fetch", "--no-tags", "--no-write-fetch-head", "origin", headSha]);
+        if (fetched.ExitCode != 0) throw new InvalidOperationException("Cannot fetch the exact review source.");
+        var created = await RunGitInAsync(WorkspaceRoot, "", ct, ["worktree", "add", "--detach", path, headSha]);
+        if (created.ExitCode != 0) throw new InvalidOperationException("Cannot create isolated review snapshot.");
+        if (await GetHeadShaAsync(path, ct) != headSha)
+            throw new InvalidOperationException("Review snapshot does not match its pinned source.");
+        return path;
+    }
+
+    /// <summary>Remove only a controller-created detached review checkout after its worker is retired.</summary>
+    public bool IsReviewSnapshotPath(string path) =>
+        Path.GetDirectoryName(Path.GetFullPath(path)) == Path.GetFullPath(WorktreeRoot).TrimEnd(Path.DirectorySeparatorChar)
+        && System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path), "\\Areview-[0-9a-f]{64}\\z");
+
+    public ReviewSnapshotRetirement? PrepareReviewSnapshotRetirement(string path) =>
+        _publisherToken is not null || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE"))
+            ? IsolatedGitMetadata.PrepareReviewSnapshotRetirement(WorkspaceRoot, WorktreeRoot, path) : null;
+
+    public async Task RemoveReviewSnapshotAsync(string path, CancellationToken ct = default, ReviewSnapshotRetirement? retirement = null)
+    {
+        path = Path.GetFullPath(path);
+        if (!IsReviewSnapshotPath(path))
+            throw new InvalidOperationException("Review cleanup is outside the authorized snapshot root.");
+        if (_publisherToken is not null || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+        {
+            ct.ThrowIfCancellationRequested();
+            IsolatedGitMetadata.RemoveDetachedReviewSnapshot(WorkspaceRoot, WorktreeRoot, path, retirement);
+            return;
+        }
+        if (!Directory.Exists(path)) return;
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("Review cleanup refuses a linked directory.");
+        var branch = await RunGitInAsync(path, "", ct, ["symbolic-ref", "-q", "HEAD"]);
+        if (branch.ExitCode != 1) throw new InvalidOperationException("Review cleanup requires detached HEAD.");
+        var removed = await RunGitInAsync(WorkspaceRoot, "", ct, ["worktree", "remove", "--force", path]);
+        if (removed.ExitCode != 0 || Directory.Exists(path))
+            throw new InvalidOperationException("Review snapshot cleanup failed.");
+    }
+
+    public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default, string? branchOverride = null, bool preserveExistingBranch = false)
     {
         // The worktree branch must equal the branch the rest of the
         // pipeline uses (claim metadata -> prompt -> CommitPushPr push
         // refspec). When the issue carries an explicit branch in its
         // metadata, honor it here; otherwise the canonical agent/<id>.
         var branch = branchOverride ?? $"agent/{Sanitize(taskId)}";
+        ValidateGitComponent(branch, "branch");
+        ValidateGitComponent(baseBranch, "base branch");
         var worktreePath = WorktreePathFor(taskId);
 
         Directory.CreateDirectory(WorktreeRoot);
@@ -91,8 +257,11 @@ public sealed class GitWorktreeService
             return worktreePath;
         }
 
-        var args = $"worktree add -B \"{branch}\" \"{worktreePath}\" \"{baseBranch}\"";
-        var result = await RunGitAsync(args, cancellationToken);
+        var createFlag = preserveExistingBranch ? "-b" : "-B";
+        var args = $"worktree add {createFlag} \"{branch}\" \"{worktreePath}\" \"{baseBranch}\"";
+        var result = preserveExistingBranch
+            ? await RunGitInAsync(WorkspaceRoot, "", cancellationToken, ["worktree", "add", "-b", branch, worktreePath, baseBranch])
+            : await RunGitAsync(args, cancellationToken);
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"git worktree add failed (exit={result.ExitCode}): {result.Stderr}");
 
@@ -372,6 +541,15 @@ public sealed class GitWorktreeService
         return result.Stdout.Trim();
     }
 
+    public async Task<string> GetCommitTreeShaAsync(string worktreePath, string commitSha, CancellationToken ct = default)
+    {
+        if (commitSha.Length != 40 || commitSha.Any(c => !char.IsAsciiHexDigit(c)))
+            throw new ArgumentException("An exact commit SHA is required.", nameof(commitSha));
+        var result = await RunGitInAsync(worktreePath, "", ct, ["rev-parse", "--verify", commitSha + "^{tree}"]);
+        if (result.ExitCode != 0) throw new InvalidOperationException("Could not resolve the verified commit tree.");
+        return result.Stdout.Trim();
+    }
+
     public async Task<string> GetHeadShaAsync(string worktreePath, CancellationToken cancellationToken = default)
     {
         var result = await RunGitInAsync(worktreePath, "rev-parse HEAD", cancellationToken);
@@ -516,12 +694,14 @@ public sealed class GitWorktreeService
     private async Task<GitResult> RunGitAsync(string arguments, CancellationToken cancellationToken)
         => await RunGitInAsync(WorkspaceRoot, arguments, cancellationToken);
 
-    private async Task<GitResult> RunGitInAsync(string workingDir, string arguments, CancellationToken cancellationToken)
+    private async Task<GitResult> RunGitInAsync(string workingDir, string arguments, CancellationToken cancellationToken, IReadOnlyList<string>? argumentList = null)
     {
+        using var isolation = _publisherToken is null && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE"))
+            ? null : new IsolatedGitMetadata(workingDir, _publisherRepository, WorktreeRoot, WorkspaceRoot);
         var psi = new ProcessStartInfo
         {
             FileName = "git",
-            Arguments = arguments,
+            Arguments = argumentList is null ? arguments : string.Empty,
             WorkingDirectory = workingDir,
             UseShellExecute = false,
             RedirectStandardOutput = true,
@@ -530,6 +710,8 @@ public sealed class GitWorktreeService
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        if (argumentList is not null)
+            foreach (var argument in argumentList) psi.ArgumentList.Add(argument);
         // Authenticate via env var so the git credential helper doesn't
         // try to prompt on stdin (which hangs in non-interactive
         // contexts like the SCM). GCM and libsecret ignore this, but
@@ -543,13 +725,64 @@ public sealed class GitWorktreeService
             psi.Environment["GITHUB_TOKEN"] = _githubToken;
         }
 
+        isolation?.Configure(psi);
+        // App credentials exist only in this trusted controller child process. Never persist them in a shared worktree.
+        string? authorization = null;
+        var network = (argumentList?.FirstOrDefault() ?? arguments.Split(' ', 2)[0]) is "fetch" or "push" or "pull" or "ls-remote";
+        if (isolation is not null && network && _publisherToken is null)
+            throw new InvalidOperationException("App-enabled controller network Git requires an explicitly configured publisher.");
+        if (_publisherToken is not null && network)
+        {
+            if (_publisherRepository is null) throw new InvalidOperationException("Publisher repository scope is missing.");
+            IsolatedGitMetadata.ValidateRepository(_publisherRepository);
+            if (argumentList is not null)
+            {
+                if (argumentList.Count(a => a == "origin") != 1)
+                    throw new InvalidOperationException("Authenticated Git must target the configured origin explicitly.");
+                psi.ArgumentList.Clear();
+                foreach (var argument in argumentList) psi.ArgumentList.Add(argument == "origin" ? _publisherRepository : argument);
+            }
+            else
+            {
+                if (System.Text.RegularExpressions.Regex.Matches(arguments, @"(?<!\S)origin(?!\S)").Count != 1)
+                    throw new InvalidOperationException("Authenticated Git must target the configured origin explicitly.");
+                psi.Arguments = System.Text.RegularExpressions.Regex.Replace(arguments, @"(?<!\S)origin(?!\S)", _publisherRepository);
+            }
+            if ((argumentList?.FirstOrDefault() ?? arguments.Split(' ', 2)[0]) == "push")
+            {
+                var validate = ControllerGitRunner.NewProcess();
+                isolation!.Configure(validate);
+                validate.ArgumentList.Add("fsck"); validate.ArgumentList.Add("--full"); validate.ArgumentList.Add("--no-reflogs");
+                if ((await ControllerGitRunner.ExecuteAsync(validate, cancellationToken)).ExitCode != 0)
+                    throw new InvalidOperationException("Imported Git objects failed integrity validation before publication.");
+            }
+            var token = await _publisherToken() ?? throw new InvalidOperationException("Publisher App token unavailable.");
+            authorization = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("x-access-token:" + token));
+            psi.Environment.Remove("GITHUB_TOKEN");
+            psi.Environment["GIT_CONFIG_COUNT"] = "3";
+            psi.Environment["GIT_CONFIG_KEY_0"] = "credential.helper";
+            psi.Environment["GIT_CONFIG_VALUE_0"] = "";
+            psi.Environment["GIT_CONFIG_KEY_1"] = "http." + _publisherRepository + ".extraheader";
+            psi.Environment["GIT_CONFIG_VALUE_1"] = "AUTHORIZATION: " + authorization;
+            psi.Environment["GIT_CONFIG_KEY_2"] = "http." + _publisherRepository + ".git.extraheader";
+            psi.Environment["GIT_CONFIG_VALUE_2"] = "AUTHORIZATION: " + authorization;
+        }
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start git process");
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderrTask = proc.StandardError.ReadToEndAsync(cancellationToken);
-        await proc.WaitForExitAsync(cancellationToken);
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        try { await proc.WaitForExitAsync(cancellationToken); }
+        catch (OperationCanceledException)
+        {
+            if (!proc.HasExited) proc.Kill(entireProcessTree: true);
+            await proc.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(stdoutTask, stderrTask);
+            throw;
+        }
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
+        if (authorization is not null) { stdout = stdout.Replace(authorization, "[redacted]", StringComparison.Ordinal); stderr = stderr.Replace(authorization, "[redacted]", StringComparison.Ordinal); }
+        if (proc.ExitCode == 0) isolation?.PublishData();
         return new GitResult(proc.ExitCode, stdout, stderr);
     }
 
@@ -569,9 +802,15 @@ public sealed class GitWorktreeService
             throw new InvalidOperationException($"GitWorktreeService: {label} must not start with '-' (got '{component}')");
         foreach (var c in component)
         {
-            if (char.IsWhiteSpace(c))
+            if (char.IsWhiteSpace(c) || c is '"' or '\\' or '\0')
                 throw new InvalidOperationException($"GitWorktreeService: {label} must not contain whitespace (got '{component}')");
         }
+    }
+
+    private static string NormalizeRepositoryUrl(Uri uri)
+    {
+        var value = uri.GetLeftPart(UriPartial.Path).TrimEnd('/');
+        return value.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? value[..^4] : value;
     }
 
     private static string Sanitize(string s)

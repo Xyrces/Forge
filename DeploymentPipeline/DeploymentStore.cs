@@ -12,7 +12,7 @@ namespace Forge.Deploy;
 // IssueStore construction against a given db path (which every project
 // already does at startup) guarantees this table exists before a
 // DeploymentStore touches it.
-public sealed class DeploymentStore
+public sealed partial class DeploymentStore
 {
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
@@ -126,7 +126,7 @@ public sealed class DeploymentStore
         cmd.CommandText = $"""
             UPDATE {T("deployment")}
             SET status = @s, approved_at = @now, approved_by = @by
-            WHERE id = @id AND status IN (@fromPending, @fromBuildPassed)
+            WHERE id = @id AND environment_name IS NULL AND status IN (@fromPending, @fromBuildPassed)
             """;
         cmd.AddParam("@s", DeploymentStatus.Approved.ToString());
         cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
@@ -136,6 +136,23 @@ public sealed class DeploymentStore
         cmd.AddParam("@fromBuildPassed", DeploymentStatus.BuildPassed.ToString());
         var rows = await cmd.ExecuteNonQueryAsync(ct);
         return rows > 0;
+    }
+
+    internal async Task<bool> TryApproveTargetAsync(DeploymentCandidate candidate, string actor, CancellationToken ct)
+    {
+        if (candidate.EnvironmentName is null) return await TryApproveAsync(candidate.Id, actor, ct);
+        await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        await LockAdmissionAsync(conn, tx, ct);
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        var table = T("deployment");
+        cmd.CommandText = $"UPDATE {table} SET status='Approved',approved_by=@actor,approved_at=@now WHERE id=@id AND project_id=@project AND environment_name=@env AND status='BuildPassed' AND NOT EXISTS(SELECT 1 FROM {table} WHERE project_id=@project AND environment_name=@env AND id<>@id AND status IN ('Approved','Deploying'))";
+        cmd.AddParam("@actor", actor); cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat)); cmd.AddParam("@id", candidate.Id);
+        cmd.AddParam("@project", candidate.ProjectId); cmd.AddParam("@env", candidate.EnvironmentName);
+        var approved = await cmd.ExecuteNonQueryAsync(ct) == 1;
+        await tx.CommitAsync(ct);
+        return approved;
     }
 
     // Same CAS shape as TryApproveAsync. Rejecting is only meaningful
@@ -194,14 +211,16 @@ public sealed class DeploymentStore
     private string SelectColumns => $"""
         SELECT id, project_id, commit_sha, commit_summary, status,
                requested_at, requested_by, build_log, approved_at,
-               approved_by, deployed_at, deploy_log
+               approved_by, deployed_at, deploy_log, completion_id, receipt_json,
+               environment_name, target_json, source_candidate_id, retry_of_candidate_id
         FROM {T("deployment")}
         """;
 
     private string SelectColumnsTop => $"""
         SELECT {_db.Dialect.TopParam("@limit")}id, project_id, commit_sha, commit_summary, status,
                requested_at, requested_by, build_log, approved_at,
-               approved_by, deployed_at, deploy_log
+               approved_by, deployed_at, deploy_log, completion_id, receipt_json,
+               environment_name, target_json, source_candidate_id, retry_of_candidate_id
         FROM {T("deployment")}
         """;
 
@@ -217,9 +236,16 @@ public sealed class DeploymentStore
         ApprovedAt: rd.IsDBNull(8) ? null : DateTime.Parse(rd.GetString(8)),
         ApprovedBy: rd.IsDBNull(9) ? null : rd.GetString(9),
         DeployedAt: rd.IsDBNull(10) ? null : DateTime.Parse(rd.GetString(10)),
-        DeployLog: rd.IsDBNull(11) ? null : rd.GetString(11));
+        DeployLog: rd.IsDBNull(11) ? null : rd.GetString(11),
+        CompletionId: rd.IsDBNull(12) ? null : rd.GetString(12),
+        ReceiptJson: rd.IsDBNull(13) ? null : rd.GetString(13),
+        EnvironmentName: rd.IsDBNull(14) ? null : rd.GetString(14),
+        TargetJson: rd.IsDBNull(15) ? null : rd.GetString(15),
+        SourceCandidateId: rd.IsDBNull(16) ? null : rd.GetString(16),
+        RetryOfCandidateId: rd.IsDBNull(17) ? null : rd.GetString(17));
 }
 
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<DeploymentStatus>))]
 public enum DeploymentStatus
 {
     Pending,
@@ -245,4 +271,13 @@ public sealed record DeploymentCandidate(
     DateTime? ApprovedAt,
     string? ApprovedBy,
     DateTime? DeployedAt,
-    string? DeployLog);
+    string? DeployLog,
+    string? CompletionId = null,
+    string? ReceiptJson = null,
+    string? EnvironmentName = null,
+    string? TargetJson = null,
+    string? SourceCandidateId = null,
+    string? RetryOfCandidateId = null)
+{
+    public string? PromotionUnavailableReason { get; init; }
+}

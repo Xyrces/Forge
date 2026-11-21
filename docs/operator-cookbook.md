@@ -1,6 +1,6 @@
-﻿# Operator cookbook
+﻿# Operator cookbook for the earlier in-process service
 
-Common scenarios you'll hit while running the orchestrator. Each recipe is one focused thing you can copy-paste.
+These recipes describe the earlier dashboard and local database layout. For today's dashboard, see [Using Forge](user-guide.md). For K3s operations and commands, see the [runtime reference](runtime-reference.md).
 
 ## Dashboard navigation (P6)
 
@@ -279,7 +279,7 @@ Output:
 
 ```
 P4 StartupRecovery: DRY-RUN
-  workspace: C:\Users\jtn50\repos\gamedev\PortHorizon
+  workspace: C:\Users\forge-operator\projects\PortHorizon
   state dir: C:\...\portHorizon\state
 
   scanned: 2
@@ -523,9 +523,9 @@ For the full guide see `docs/multi-project.md`. The key flows:
 { "workspace": { "root": "" }, "forgesystem": { "dataRoot": "" } }
 
 dotnet run --project Forge -- --check
-# => Forgesystem data root: C:\Users\jtn50\AppData\Local\Forge
-# => Project 'default' root=C:\Users\jtn50\AppData\Local\Forge\projects\default
-# => state=C:\Users\jtn50\AppData\Local\Forge\projects\default\.forge\state
+# => Forgesystem data root: C:\Users\forge-operator\AppData\Local\Forge
+# => Project 'default' root=C:\Users\forge-operator\AppData\Local\Forge\projects\default
+# => state=C:\Users\forge-operator\AppData\Local\Forge\projects\default\.forge\state
 # => created=True gitInit=True
 
 dotnet run --project Forge -- --dashboard-only

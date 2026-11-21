@@ -57,8 +57,13 @@ public class GroomerTaskTests : IDisposable
     public async Task Approve_MarksGroomedWithNote_StatusStaysPending()
     {
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "one-off"));
-        var client = new RecordingToolCallClient(
-            "approve_task", new Dictionary<string, object?> { ["note"] = "serves the vision", ["priority"] = 4 });
+        var scope = await ApprovedSprintFixture.Scope(_issues);
+        var binding = new SprintOutcomeBinding(1,"goal","Useful outcome",
+            [new("criterion","Observable behavior",SprintEvidenceKind.MergedAndVerified,scope)],
+            [task.Id],["criterion"],SprintMemberReason.Remediates,scope);
+        var client = new MultiToolCallingChatClient([
+            new FunctionCallContent("bind","bind_outcome",new Dictionary<string,object?> { ["taskId"]=task.Id,["bindingJson"]=SprintPlanJson.Serialize(binding) }),
+            new FunctionCallContent("approve","approve_task",new Dictionary<string,object?> { ["note"]="serves the vision",["priority"]=4 })],"Done.");
 
         var outcome = await NewAgent(client).GroomTaskAsync(task.Id);
 

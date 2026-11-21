@@ -8,7 +8,7 @@ namespace Forge.Orchestrator;
 /// <summary>
 /// The state-driven PR watch sweep, extracted from OrchestratorAgent
 /// for the message-driven watch pipeline: the SweepTick(watch)
-/// consumer runs <see cref="SweepProjectAsync"/> (15m backstop,
+/// consumer runs <see cref="SweepProjectAsync"/> (one-minute polling,
 /// GitHub truth), and the PrOpened consumer calls
 /// <see cref="TryLaunchBackgroundReviewAsync"/> for the immediate
 /// review fast path. Owns the in-flight review registry and the
@@ -46,15 +46,60 @@ public sealed class WatchSweepService
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _qaInFlight = new();
     private static readonly TimeSpan QaRelaunchAfter = TimeSpan.FromMinutes(45);
 
-    /// <summary>Background reviews/QA runs are fire-and-forget — they
-    /// must outlive the caller (a sweep tick, a consumer handle), so
-    /// they NEVER inherit the caller's CancellationToken: a caller
-    /// token canceling mid-run escapes the dispatchers' non-OCE catch
-    /// filters, and the continuation's t.Result access then throws
-    /// unobserved — a completed pass vanishing without a single log
-    /// line (the task-740 silent-verdict loop, 2026-08-24). Each
-    /// background run gets its own CTS bounded by the dispatcher's run
-    /// timeout plus git-work margin.</summary>
+    // Runs outlive individual message handlers, but never the controller lifetime.
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly object _backgroundGate = new();
+    private readonly HashSet<Task> _backgroundTasks = [];
+    private bool _stopping;
+
+    internal bool StartBackground(string key, bool qa, Func<CancellationToken, Task> action, TimeSpan budget)
+    {
+        lock (_backgroundGate)
+        {
+            if (_stopping) return false;
+            var registry = qa ? _qaInFlight : _reviewsInFlight;
+            if (registry.TryGetValue(key, out var existing) && !existing.IsCompleted) return false;
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            registry[key] = completion.Task;
+            _backgroundTasks.Add(completion.Task);
+            _ = ExecuteAsync();
+            return true;
+
+            async Task ExecuteAsync()
+            {
+                using var runCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+                runCts.CancelAfter(budget);
+                try { await action(runCts.Token); }
+                catch (OperationCanceledException) when (runCts.IsCancellationRequested)
+                { _logger.LogInformation("Background watch work {Key} cancelled; durable workers remain adoptable", key); }
+                catch (Exception ex)
+                { _logger.LogError(ex, "Background watch work {Key} failed", key); }
+                finally
+                {
+                    lock (_backgroundGate)
+                    {
+                        registry.TryRemove(key, out _);
+                        _backgroundTasks.Remove(completion.Task);
+                        completion.SetResult();
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Close local admission, cancel waits, and join entire callbacks before lease release.</summary>
+    public async Task StopAsync()
+    {
+        Task[] pending;
+        lock (_backgroundGate)
+        {
+            _stopping = true;
+            pending = _backgroundTasks.ToArray();
+        }
+        _lifetime.Cancel();
+        await Task.WhenAll(pending);
+    }
+
     private static readonly TimeSpan ReviewBackgroundBudget =
         Forge.Reviewer.ReviewerDispatcher.ReviewRunTimeout + TimeSpan.FromMinutes(3);
     private static readonly TimeSpan QaBackgroundBudget =
@@ -123,9 +168,11 @@ public sealed class WatchSweepService
     /// then the merge/rework decision (PRWatcher.PollWatchedTaskAsync).
     /// A 429 aborts the sweep early and arms the cooldown.
     /// </summary>
-    public async Task SweepProjectAsync(ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    public async Task SweepProjectAsync(ProjectDispatchBundle bundle, CancellationToken cancellationToken,
+        Func<IssueRecord, bool>? includeTask = null)
     {
         var watchedTasks = await DiscoverWatchedTasksAsync(bundle, cancellationToken);
+        if (includeTask is not null) watchedTasks = watchedTasks.Where(includeTask).ToList();
         if (watchedTasks.Count == 0) return;
         if (DateTime.UtcNow < _githubRateLimitedUntil)
         {
@@ -146,7 +193,7 @@ public sealed class WatchSweepService
                 // back; ANY other Blocked task gets the mergeable gate
                 // check — if the blockage cleared externally, the watch
                 // resumes and merges without an operator roundtrip.
-                var polled = watched;
+                var polled = await PublishedRunLifecycle.ReconcileAsync(bundle.IssueStore, _lifecycle, watched, cancellationToken);
                 if (watched.Status == IssueStatus.Blocked)
                 {
                     IssueRecord? resumed = IsAutoResumableBlock(watched)
@@ -172,11 +219,20 @@ public sealed class WatchSweepService
                 var poll = await bundle.PrWatcher.PollWatchedTaskAsync(polled, cancellationToken);
                 _logger.LogDebug("Watch (task {Id}): {Outcome}", watched.Id, poll);
             }
-            catch (Octokit.RateLimitExceededException)
+            catch (Octokit.ApiException ex) when (ex is Octokit.RateLimitExceededException or Octokit.SecondaryRateLimitExceededException)
             {
-                _githubRateLimitedUntil = DateTime.UtcNow + GitHubRateLimitCooldown;
+                var now = DateTime.UtcNow;
+                var until = ex is Octokit.RateLimitExceededException primary && primary.Reset.UtcDateTime > now
+                    ? primary.Reset.UtcDateTime : now + GitHubRateLimitCooldown;
+                if (ex.HttpResponse?.Headers is { } headers)
+                {
+                    var retry = headers.FirstOrDefault(h => h.Key.Equals("Retry-After", StringComparison.OrdinalIgnoreCase)).Value;
+                    if (int.TryParse(retry, out var seconds) && seconds > 0) until = now.AddSeconds(seconds);
+                    else if (DateTimeOffset.TryParse(retry, out var date) && date.UtcDateTime > now) until = date.UtcDateTime;
+                }
+                _githubRateLimitedUntil = until;
                 _logger.LogWarning("Watch sweep: GitHub rate limit exceeded; backing off for {Cooldown} (project={Project})",
-                    GitHubRateLimitCooldown, bundle.Project.Id);
+                    _githubRateLimitedUntil - now, bundle.Project.Id);
                 return;
             }
             catch (Exception ex)
@@ -259,6 +315,12 @@ public sealed class WatchSweepService
     /// marker is fresh (covers pre-restart reviews).</summary>
     internal bool ShouldLaunchReview(IssueRecord task, string projectId)
     {
+        if (ReviewIntegrationState.IsBlocked(task)
+            || ReviewIntegrationState.Exhausted(task, task.GetMetadata("watchHeadSha") ?? "")) return false;
+        if (task.GetMetadata("reviewVerdict") == "Error"
+            && task.GetMetadata("reviewSha") == task.GetMetadata("watchHeadSha")
+            && int.TryParse(task.GetMetadata("reviewErrorAttempts"), out var failures) && failures >= 3)
+            return false;
         var key = projectId + "/" + task.Id;
         if (_reviewsInFlight.TryGetValue(key, out var inFlight) && !inFlight.IsCompleted)
         {
@@ -281,10 +343,12 @@ public sealed class WatchSweepService
     public async Task TryLaunchBackgroundReviewAsync(
         IssueRecord task, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
+        task = await PublishedRunLifecycle.ReconcileAsync(bundle.IssueStore, _lifecycle, task, cancellationToken);
+        if (await bundle.PrWatcher.HasOwnedWorkerAsync(task.Id, cancellationToken)) return;
         var reviewEnabled = _workflow is null
             || Core.Workflow.WorkflowExtensions.IsStepEnabled(
                 await _workflow.ResolveAsync(cancellationToken), "review");
-        if (!reviewEnabled) return;
+
 
         var key = bundle.Project.Id + "/" + task.Id;
 
@@ -304,6 +368,9 @@ public sealed class WatchSweepService
             return;
         }
 
+        if (!reviewEnabled || await new PullRequestReviewPolicy(new MemoryStore(bundle.IssueStore.Db))
+            .GetModeAsync(cancellationToken) == RequiredReview.Human) return;
+
         if (!ShouldLaunchReview(task, bundle.Project.Id))
         {
             return;
@@ -316,24 +383,11 @@ public sealed class WatchSweepService
             events: _events,
             projectId: bundle.Project.Id,
             eventPublisher: bundle.IssueStore.Events,
-            qaEnabled: bundle.Project.QaEnabled);
-        var runCts = new CancellationTokenSource(ReviewBackgroundBudget);
-        var run = reviewer.ReviewOnceAsync(task, runCts.Token);
-        _reviewsInFlight[key] = run;
-        _ = run.ContinueWith(t =>
-        {
-            runCts.Dispose();
-            _reviewsInFlight.TryRemove(key, out _);
-            if (t.IsFaulted)
-            {
-                _logger.LogError(t.Exception, "background review for {TaskId} faulted (project={Project})", task.Id, bundle.Project.Id);
-            }
-            else if (t.IsCanceled)
-            {
-                _logger.LogWarning("background review for {TaskId} was canceled before landing a verdict (project={Project}) — relaunch gate covers", task.Id, bundle.Project.Id);
-            }
-        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        _logger.LogInformation("Watch (task {Id}): review launched in background (project={Project})", task.Id, bundle.Project.Id);
+            qaEnabled: bundle.Project.QaEnabled,
+            worktrees: bundle.Worktrees);
+        if (StartBackground(key, qa: false,
+            async ct => { await reviewer.ReviewOnceAsync(task, ct); }, ReviewBackgroundBudget))
+            _logger.LogInformation("Watch (task {Id}): review launched in background (project={Project})", task.Id, bundle.Project.Id);
     }
 
     /// <summary>QA-due check from task metadata (cheap — no GitHub
@@ -396,60 +450,22 @@ public sealed class WatchSweepService
             events: _events,
             visualPaths: Forge.Reviewer.QaEvidenceTierClassifier.ResolveVisualPrefixes(
                 bundle.Project.Territories, bundle.Project.QaVisualPaths));
-        var runCts = new CancellationTokenSource(QaBackgroundBudget);
-        var run = qa.VerifyOnceAsync(task, runCts.Token);
-        _qaInFlight[key] = run;
-        _ = run.ContinueWith(async t =>
+        if (StartBackground(key, qa: true, async ct =>
         {
-            runCts.Dispose();
-            _qaInFlight.TryRemove(key, out _);
-            if (t.IsFaulted)
+            var result = await qa.VerifyOnceAsync(task, ct);
+            // The follow-on callback is part of the joined lifetime too.
+            ct.ThrowIfCancellationRequested();
+            if (result is null || result.Verdict is Forge.Reviewer.QaDispatcher.VerdictPass
+                or Forge.Reviewer.QaDispatcher.VerdictNotApplicable)
             {
-                _logger.LogError(t.Exception, "background QA for {TaskId} faulted (project={Project})", task.Id, bundle.Project.Id);
-                return;
-            }
-            if (t.IsCanceled)
-            {
-                // Never access t.Result on a canceled task — it throws
-                // and the exception dies unobserved in this fire-and-
-                // forget continuation.
-                _logger.LogWarning("background QA for {TaskId} was canceled before landing a verdict (project={Project}) — relaunch gate covers", task.Id, bundle.Project.Id);
-                return;
-            }
-            // QA passed (or was stamped not-applicable — a docs-only
-            // head owes no playthrough) → the review follows immediately
-            // (the reviewer self-skips on any other outcome). A null
-            // outcome means QA was already current — launch the review
-            // too, or a task whose QA predates the deploy would wait
-            // out the backstop.
-            if (t.Result is null
-                || t.Result.Verdict == Forge.Reviewer.QaDispatcher.VerdictPass
-                || t.Result.Verdict == Forge.Reviewer.QaDispatcher.VerdictNotApplicable)
-            {
-                try
-                {
-                    var fresh = await bundle.IssueStore.GetAsync(task.Id, CancellationToken.None);
-                    if (fresh is not null)
-                        await TryLaunchBackgroundReviewAsync(fresh, bundle, CancellationToken.None);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "post-QA review relaunch failed for {TaskId}", task.Id);
-                }
+                var fresh = await bundle.IssueStore.GetAsync(task.Id, ct);
+                if (fresh is not null) await TryLaunchBackgroundReviewAsync(fresh, bundle, ct);
             }
             else
-            {
-                // Non-pass, non-current outcome: the verdict/error is
-                // already on the task (qaVerdict / qaLastError) — echo
-                // it here so the sweep journal names it too.
-                _logger.LogWarning(
-                    "background QA for {TaskId}: {Verdict} at {Sha} — {Detail} (project={Project})",
-                    task.Id, t.Result.Verdict,
-                    t.Result.HeadSha[..Math.Min(7, t.Result.HeadSha.Length)],
-                    t.Result.Error ?? t.Result.Notes, bundle.Project.Id);
-            }
-        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        _logger.LogInformation("Watch (task {Id}): QA stage launched in background (project={Project})", task.Id, bundle.Project.Id);
+                _logger.LogWarning("Background QA for {TaskId}: {Verdict} — {Detail} (project={Project})",
+                    task.Id, result.Verdict, result.Error ?? result.Notes, bundle.Project.Id);
+        }, QaBackgroundBudget))
+            _logger.LogInformation("Watch (task {Id}): QA stage launched in background (project={Project})", task.Id, bundle.Project.Id);
     }
 
     private async Task ReportLifecycleAsync(

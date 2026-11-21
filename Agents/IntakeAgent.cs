@@ -6,6 +6,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Forge.Core;
+using Forge.Core.Initiatives;
 using Forge.Dashboard;
 using Forge.Specs;
 
@@ -16,7 +17,7 @@ namespace Forge.Agents;
 /// and an LLM, scoped to a single project. The agent decides when to
 /// propose an epic via the <see cref="CreateEpicTool"/> AIFunction; the
 /// operator reviews proposed epics in the dashboard and either accepts
-/// (which binds the issue to the active sprint) or lets the LLM
+/// (which durably authorizes the exact revision for planning) or lets the LLM
 /// iterate.
 ///
 /// <para>
@@ -47,11 +48,10 @@ namespace Forge.Agents;
 /// </summary>
 public sealed class IntakeAgent
 {
+    private readonly InitiativeApprovalService? _initiatives;
     private readonly string _projectId;
     private readonly IIntakeStore _intakeStore;
     private readonly IIssueStore _issues;
-    private readonly ISprintStore _sprints;
-    private readonly ISpecStore? _specs;
     private readonly IChatClientFactory _chatClientFactory;
     private readonly LlmConfig _config;
     private readonly RoleAgentRegistry _roles;
@@ -62,6 +62,7 @@ public sealed class IntakeAgent
     private readonly string _defaultModel;
     private readonly Func<string, string?>? _projectRootLookup;
     private readonly Core.MemoryStore? _memory;
+    private readonly string? _legacyVisionOwnerProjectId;
     private string? _repoBriefCache;
     private DateTime _repoBriefBuiltAt = DateTime.MinValue;
     private static readonly TimeSpan RepoBriefTtl = TimeSpan.FromMinutes(10);
@@ -81,13 +82,14 @@ public sealed class IntakeAgent
         string rolePromptsRoot = "agents",
         string defaultModel = "minimax-m2",
         Func<string, string?>? projectRootLookup = null,
-        Core.MemoryStore? memory = null)
+        Core.MemoryStore? memory = null,
+        InitiativeApprovalService? initiatives = null,
+        string? legacyVisionOwnerProjectId = null)
     {
+        _initiatives = initiatives;
         _projectId = projectId;
         _intakeStore = intakeStore;
         _issues = issues;
-        _sprints = sprints;
-        _specs = specs;
         _chatClientFactory = chatClientFactory;
         _config = config;
         _roles = roles;
@@ -98,6 +100,7 @@ public sealed class IntakeAgent
         _defaultModel = defaultModel;
         _projectRootLookup = projectRootLookup;
         _memory = memory;
+        _legacyVisionOwnerProjectId = legacyVisionOwnerProjectId;
     }
 
     public string ProjectId => _projectId;
@@ -118,12 +121,19 @@ public sealed class IntakeAgent
     /// the intake session.
     /// </summary>
     public async Task<IntakeSessionRecord> SendUserMessageAsync(
-        string sessionId, string userText, CancellationToken ct = default)
+        string sessionId, string userText, CancellationToken ct = default, InitiativeProposal? workingBrief = null)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
             throw new ArgumentException("sessionId is required", nameof(sessionId));
         if (string.IsNullOrWhiteSpace(userText))
             throw new ArgumentException("userText is required", nameof(userText));
+
+        var ownedSession = await _intakeStore.GetAsync(sessionId, ct)
+            ?? throw new InvalidOperationException("Intake session not found.");
+        if (ownedSession.ProjectId != _projectId)
+            throw new InvalidOperationException("Intake session belongs to another project.");
+        if (workingBrief is not null && (workingBrief.SessionId != sessionId || workingBrief.ProjectId != _projectId))
+            throw new InvalidOperationException("Working brief belongs to another conversation.");
 
         // Append the user message first so the message is durable even
         // if the LLM call throws. The agent response is appended after.
@@ -152,16 +162,17 @@ public sealed class IntakeAgent
         var createEpicTool = AIFunctionFactory.Create(
             ([Description("Title of the proposed epic.")] string title,
              [Description("Long-form description of what the epic covers.")] string description,
-             [Description("Optional priority 1-5; defaults to 2.")] int? priority) =>
-                CreateEpicAsync(sessionId, title, description, priority, ct),
+             [Description("Optional priority 1-5; defaults to 2.")] int? priority = null,
+             [Description("Existing stable proposal ID when revising; omit for a new initiative.")] string? proposalId = null,
+             [Description("Exact current revision when revising an existing proposal.")] int? expectedRevision = null) =>
+                CreateEpicAsync(sessionId, title, description, priority, proposalId, expectedRevision, ct),
             name: "create_epic",
             description: "Propose a new epic for the operator to review. " +
-                         "Use this when the operator's input describes a piece of work " +
-                         "large enough to be a multi-task epic (vs. a single dev task). " +
-                         "The proposal is a DRAFT that lives in this conversation only — " +
+                         "Use this for an operator's new initiative, including a small, clearly scoped change. " +
+                         "The proposal is a durable unapproved draft in the working brief, linked to this conversation — " +
                          "no issue is created and nothing appears on the project board " +
-                         "until the operator accepts the proposal. Returns a draft " +
-                         "reference (the proposal's message id), not an issue id.");
+                         "until the operator approves its exact revision. Returns a stable proposal ID " +
+                         "and revision, not an issue ID. For changes, pass proposalId and expectedRevision.");
 
         // Structured clarifying questions (operator request 2026-08-12):
         // the tool captures the questions so the dashboard renders them
@@ -208,40 +219,21 @@ public sealed class IntakeAgent
                          "The operator can pick options, multi-select when multiple=true, or " +
                          "answer any question free-form via its 'Other' input.");
 
-        // Phase 2a tools: touches + add_dependency. Both require
-        // SpecStore. We expose them as AIFunctions only when a
-        // SpecStore was injected; otherwise the agent is told (via
-        // its instructions) that these tools are unavailable.
+        // Discussion tools can only create/revise drafts or ask questions.
+        // Approved specs belong to the downstream planning pipeline; Intake
+        // must not silently change previously approved scope through tool calls.
         var tools = new List<AITool> { createEpicTool, askQuestionsTool };
-        if (_specs is not null)
+
+        var instructions = await BuildIntakeInstructionsAsync(ct);
+        if (workingBrief is not null)
         {
-            var activeSpecIdRef = sessionId;
-            var touchesTool = AIFunctionFactory.Create(
-                ([Description("Module or service this spec touches, e.g. 'PortHorizon.Core.Auth'.")] string moduleId,
-                 [Description("Why this spec affects the module.")] string rationale) =>
-                    TouchesAsync(activeSpecIdRef, moduleId, rationale, ct),
-                name: "touches",
-                description: "Declare that the current spec (the most recently proposed epic) " +
-                             "touches a module or service. Use for each module the spec " +
-                             "would change. Returns 'ok' on success.");
-            tools.Add(touchesTool);
-
-            var addDependencyTool = AIFunctionFactory.Create(
-                ([Description("Target spec id, e.g. 'spec-abc123'.")] string targetSpecId,
-                 [Description("Edge kind: 'blocks', 'depends_on', or 'related'.")] string kind,
-                 [Description("One-line reason for the edge.")] string? rationale) =>
-                    AddDependencyAsync(activeSpecIdRef, targetSpecId, kind, rationale, ct),
-                name: "add_dependency",
-                description: "Declare that the current spec has a dependency on another spec. " +
-                             "Use 'blocks' if this spec must finish before target can start. " +
-                             "Use 'depends_on' if this spec waits for target. " +
-                             "Use 'related' for informational links. Returns 'ok' on success.");
-            tools.Add(addDependencyTool);
+            var approvalState = workingBrief.ApprovedAt is null ? "draft" : "already approved";
+            instructions += $"\n\nThe working brief shown with this message is proposal {workingBrief.Id}, "
+                + $"revision {workingBrief.Revision} ({approvalState}). Resolve references like 'this brief' to that proposal.";
         }
-
         var agent = new ChatClientAgent(
             chatClient,
-            instructions: await BuildIntakeInstructionsAsync(ct),
+            instructions: instructions,
             name: "intake",
             description: $"Intake agent for project {_projectId}",
             tools: tools);
@@ -384,329 +376,64 @@ public sealed class IntakeAgent
         return (await _intakeStore.GetAsync(sessionId, ct))!;
     }
 
-    /// <summary>
-    /// Mark a proposed epic as accepted by the operator. This:
-    /// <list type="bullet">
-    ///   <item>CREATES the epic issue from the draft's payload —
-    ///   proposals are session-scoped drafts with no board row
-    ///   (operator rule 2026-08-14); accept is the moment the work
-    ///   becomes real. Epics stay in the backlog until groomed; the
-    ///   operator's "accept" means "I want this on the board" not
-    ///   "start working on it now".</item>
-    ///   <item>Creates the spec the product -> designer pipeline
-    ///   refines.</item>
-    ///   <item>Adds the issue to the active sprint (if any).</item>
-    ///   <item>Appends a system message to the intake session noting
-    ///   the acceptance (carrying the new epic id + the source
-    ///   proposal's message id, which makes accept idempotent).</item>
-    /// </list>
-    /// </summary>
-    public async Task<IssueRecord> AcceptProposedEpicAsync(
-        string sessionId, long messageId, CancellationToken ct = default)
+    /// <summary>Legacy message ids are not immutable approval credentials.</summary>
+    public Task<IssueRecord> AcceptProposedEpicAsync(string sessionId, long messageId, CancellationToken ct = default)
+        => throw new InvalidOperationException("Review this draft as a durable proposal, then approve its exact current revision.");
+
+    public async Task<InitiativeProposal> ImportLegacyDraftAsync(string sessionId, long messageId, CancellationToken ct = default)
     {
+        var service = _initiatives ?? throw new InvalidOperationException("Durable initiative approval is unavailable.");
         var session = await _intakeStore.GetAsync(sessionId, ct)
-            ?? throw new InvalidOperationException($"Intake session {sessionId} not found");
-        var msg = session.Messages.FirstOrDefault(m => m.Id == messageId)
-            ?? throw new InvalidOperationException($"Message {messageId} not found in session {sessionId}");
+            ?? throw new InvalidOperationException("Intake session not found.");
+        if (session.ProjectId != _projectId) throw new InvalidOperationException("Session belongs to another project.");
+        var message = session.Messages.SingleOrDefault(m => m.Id == messageId)
+            ?? throw new InvalidOperationException("Draft message not found.");
+        if (message.ProposedEpicDescription is null || message.ProposedEpicTitle is null)
+            throw new InvalidOperationException("This message has no complete legacy draft payload.");
+        if (message.ProposedEpicId is not null || session.Messages.Any(m =>
+            m.Role == IntakeMessageRole.System && m.ProposedEpicId is not null &&
+            m.Content.Contains($"(proposal message #{messageId})", StringComparison.Ordinal)))
+            throw new InvalidOperationException("This legacy draft already links accepted work. Review the existing epic instead of importing it again.");
+        return await service.Proposals.CreateAsync(new NewInitiativeProposal(_projectId,
+            $"legacy:{sessionId}:{messageId}", "user", message.ProposedEpicTitle,
+            message.ProposedEpicDescription, message.ProposedEpicPriority ?? 2,
+            JsonSerializer.Serialize(new { sessionId, messageId }), sessionId), ct);
+    }
 
-        // Idempotent re-accept: the accept message names its source
-        // proposal; a second click returns the already-created epic.
-        var priorAccept = session.Messages.FirstOrDefault(m =>
-            m.Role == IntakeMessageRole.System
-            && m.ProposedEpicId is not null
-            && m.Content.Contains($"(proposal message #{messageId})", StringComparison.Ordinal));
-        if (priorAccept?.ProposedEpicId is { } existingEpicId)
+    private async Task<string> CreateEpicAsync(string sessionId, string title, string description,
+        int? priority, string? proposalId, int? expectedRevision, CancellationToken ct)
+    {
+        var service = _initiatives ?? throw new InvalidOperationException("Durable initiative proposals are unavailable.");
+        var session = await _intakeStore.GetAsync(sessionId, ct)
+            ?? throw new InvalidOperationException("Intake session not found.");
+        if (session.ProjectId != _projectId) throw new InvalidOperationException("Session belongs to another project.");
+        InitiativeProposal proposal;
+        if (proposalId is not null)
         {
-            return await _issues.GetAsync(existingEpicId, ct)
-                ?? throw new InvalidOperationException(
-                    $"Proposal message {messageId} was already accepted as {existingEpicId}, but that epic no longer exists");
-        }
-
-        // Pre-redesign proposals (2026-08-14 and earlier) carry a real
-        // epic id — the row was created at proposal time. Accepting one
-        // keeps that row (no duplicate create).
-        IssueRecord issue;
-        if (msg.ProposedEpicDescription is not null)
-        {
-            issue = await _issues.CreateAsync(new NewIssue(
-                Type: "epic",
-                Title: msg.ProposedEpicTitle ?? "Untitled epic",
-                Description: msg.ProposedEpicDescription,
-                Priority: msg.ProposedEpicPriority ?? 2,
-                Assignee: "intake"), ct);
-        }
-        else if (msg.ProposedEpicId is not null)
-        {
-            issue = await _issues.GetAsync(msg.ProposedEpicId, ct)
-                ?? throw new InvalidOperationException($"Proposed epic {msg.ProposedEpicId} no longer exists");
+            var prior = await service.Proposals.GetAsync(_projectId, proposalId, ct)
+                ?? throw new InvalidOperationException("Proposal not found.");
+            if (prior.SessionId != sessionId || expectedRevision is null)
+                throw new InvalidOperationException("Revision requires the proposal's linked session and exact current revision.");
+            proposal = await service.Proposals.ReviseAsync(_projectId, proposalId, expectedRevision.Value,
+                title, description, priority ?? 2, ct);
         }
         else
         {
-            throw new InvalidOperationException(
-                $"Message {messageId} did not propose an epic; nothing to accept.");
+            proposal = await service.Proposals.CreateAsync(new NewInitiativeProposal(_projectId,
+                "intake:" + Guid.NewGuid().ToString("N"), "user", title, description, priority ?? 2,
+                JsonSerializer.Serialize(new { sessionId }), sessionId), ct);
         }
-
-        // P2.a wiring: create a spec for the accepted epic so the
-        // product -> designer pipeline has something to refine.
-        // The spec's parent_issue_id is the epic; the product
-        // refinement queue's "intake.epic.accepted" listener picks
-        // up this event, looks up the spec by parent_issue_id, and
-        // refines the body. We seed the spec body with the intake
-        // draft so Product has something to work with even before
-        // the LLM runs.
-        SpecRecord? specForEpic = null;
-        if (_specs is not null)
-        {
-            // Project-SCOPED probe: issue ids are per-store sequences
-            // (every project has an epic-2), so a fan-out lookup by
-            // parent_issue_id can match ANOTHER project's spec and
-            // silently skip creating this one (observed live
-            // 2026-08-09: talaria's accepted epic-2 found porthorizon's
-            // Epic-B spec via the collision and no talaria spec was
-            // ever created — the project never entered the pipeline).
-            var existing = await _specs.ListAsync(projectId: _projectId, status: null, ct);
-            specForEpic = existing.FirstOrDefault(s => s.ParentIssueId == issue.Id);
-            if (specForEpic is null)
-            {
-                specForEpic = await _specs.CreateAsync(new NewSpec(
-                    ProjectId: _projectId,
-                    Title: issue.Title,
-                    Body: BuildIntakeDraftBody(issue),
-                    Author: "intake",
-                    ParentIssueId: issue.Id));
-            }
-        }
-
-        // Bind to active sprint (if any).
-        var activeSprint = await _sprints.GetActiveAsync(ct);
-        if (activeSprint is not null)
-        {
-            try { await _sprints.AddIssueAsync(activeSprint.Id, issue.Id, ct); }
-            catch (InvalidOperationException)
-            {
-                // Already in the sprint; idempotent accept.
-            }
-        }
-
-        // Append a system message to the session so the audit trail is
-        // visible in the chat thread. It carries the new epic id AND
-        // the source proposal's message id — the idempotence key for
-        // re-accepts and the UI's accepted-state marker for the draft.
-        var sprintNote = activeSprint is null
-            ? "no active sprint"
-            : $"added to sprint {activeSprint.Id} ({activeSprint.Name})";
-        await _intakeStore.AppendMessageAsync(sessionId,
-            new NewIntakeMessage(IntakeMessageRole.System,
-                $"Operator accepted epic {issue.Id}: {issue.Title}; {sprintNote}. (proposal message #{messageId})",
-                ProposedEpicId: issue.Id, ProposedEpicTitle: issue.Title), ct);
-
-        _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.accepted",
-            sessionId, $"epic={issue.Id}", new Dictionary<string, object?>
+        await _intakeStore.AppendMessageAsync(sessionId, new NewIntakeMessage(IntakeMessageRole.System,
+            $"Proposal {proposal.Id} revision {proposal.Revision}: {proposal.Title}\n\n{proposal.Body}\n\nDraft only; explicit operator approval is required.",
+            ProposedEpicTitle: proposal.Title), ct);
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.proposed", sessionId,
+            proposal.Id, new Dictionary<string, object?>
             {
                 ["sessionId"] = sessionId,
-                ["epicId"] = issue.Id,
-                // Issue ids are per-store sequences — the refinement
-                // queue MUST scope its spec lookup by project or an
-                // epic-N collision routes it to another project's spec
-                // (observed live 2026-08-09: talaria epic-2 → refined
-                // porthorizon's Epic-B spec).
-                ["projectId"] = _projectId,
-                ["sprintId"] = activeSprint?.Id,
+                ["proposalId"] = proposal.Id,
+                ["revision"] = proposal.Revision
             }));
-
-        return issue;
-    }
-
-    private async Task<string> CreateEpicAsync(
-        string sessionId, string title, string description, int? priority, CancellationToken ct)
-    {
-        // Proposals are SESSION-SCOPED DRAFTS: no issue row is created
-        // here — operator rule 2026-08-14 ("we should not be creating
-        // the epics until they are accepted; they look like real work
-        // already"). The draft's full payload (title + description +
-        // priority) rides the message (schema v34); the epic row +
-        // spec are created from it at accept time.
-        //
-        // Refine-vs-new is title-scoped (normalized equality or prefix
-        // containment): re-proposing the SAME epic (retry loops,
-        // "(refined)" suffixes, non-consecutive re-calls) supersedes
-        // the matching draft instead of stacking duplicates; a clearly
-        // DIFFERENT title is a genuinely new proposal, even in the
-        // same turn — a parent + children turn must list them all.
-        // (History: 2026-08-12 identical-title storms spawned duplicate
-        // rows; 2026-08-14 the blanket collapse rewrote one row 4× and
-        // lost the children.) An ACCEPTED title's slot is closed — the
-        // same title again is a fresh draft.
-        var session = await _intakeStore.GetAsync(sessionId, ct);
-        if (session is not null)
-        {
-            var drafts = session.Messages
-                .Where(m => m.ProposedEpicDescription is not null)
-                .OrderByDescending(m => m.Id);
-            foreach (var draft in drafts)
-            {
-                if (!IsSameProposal(draft.ProposedEpicTitle!, title)) continue;
-                var alreadyAccepted = session.Messages.Any(m =>
-                    m.Role == IntakeMessageRole.System
-                    && m.Content.Contains($"(proposal message #{draft.Id})", StringComparison.Ordinal));
-                if (alreadyAccepted) break; // accepted slots are closed — fall through to a fresh draft
-                if (string.Equals(draft.ProposedEpicDescription, description, StringComparison.Ordinal)
-                    && draft.ProposedEpicPriority == priority)
-                {
-                    // Identical re-call (retry loop): no-op, point at
-                    // the existing draft instead of flooding the thread.
-                    return $"draft-{draft.Id} (already proposed)";
-                }
-                var revised = await _intakeStore.AppendMessageAsync(sessionId,
-                    new NewIntakeMessage(IntakeMessageRole.System,
-                        $"Updated epic proposal: {title}",
-                        ProposedEpicTitle: title,
-                        ProposedEpicDescription: description,
-                        ProposedEpicPriority: priority), ct);
-                _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.proposed",
-                    sessionId, $"draft-{revised.Id} (revised)", new Dictionary<string, object?>
-                    {
-                        ["sessionId"] = sessionId,
-                        ["messageId"] = revised.Id,
-                    }));
-                return $"draft-{revised.Id}";
-            }
-        }
-
-        var msg = await _intakeStore.AppendMessageAsync(sessionId,
-            new NewIntakeMessage(IntakeMessageRole.System,
-                $"Proposed epic: {title}",
-                ProposedEpicTitle: title,
-                ProposedEpicDescription: description,
-                ProposedEpicPriority: priority), ct);
-
-        _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.proposed",
-            sessionId, $"draft-{msg.Id}", new Dictionary<string, object?>
-            {
-                ["sessionId"] = sessionId,
-                ["messageId"] = msg.Id,
-            }));
-
-        return $"draft-{msg.Id}";
-    }
-
-    /// <summary>Title similarity for the refine-vs-create decision:
-    /// normalized (case/punctuation/parenthesized-qualifiers stripped)
-    /// titles count as the same proposal when equal or one contains
-    /// the other as a prefix — "ASB transport" vs
-    /// "ASB transport (refined)" refine, "Parent epic" vs
-    /// "P1-1: Fix the test harness" create.</summary>
-    private static bool IsSameProposal(string existingTitle, string newTitle)
-    {
-        var a = NormalizeProposalTitle(existingTitle);
-        var b = NormalizeProposalTitle(newTitle);
-        if (a.Length == 0 || b.Length == 0) return true;
-        return a == b
-            || a.StartsWith(b, StringComparison.Ordinal)
-            || b.StartsWith(a, StringComparison.Ordinal);
-    }
-
-    private static string NormalizeProposalTitle(string title)
-    {
-        var noParens = System.Text.RegularExpressions.Regex.Replace(title, @"\([^)]*\)", " ");
-        var lowered = noParens.ToLowerInvariant();
-        var chars = lowered.Select(c => char.IsLetterOrDigit(c) ? c : ' ').ToArray();
-        return System.Text.RegularExpressions.Regex.Replace(new string(chars), @"\s+", " ").Trim();
-    }
-
-    /// <summary>
-    /// Look up the spec most recently proposed by this session.
-    /// Used by the touches/add_dependency tools to find which spec
-    /// to attribute the call to.
-    /// </summary>
-    private async Task<SpecRecord?> MostRecentSpecAsync(string sessionId, CancellationToken ct)
-    {
-        var session = await _intakeStore.GetAsync(sessionId, ct);
-        if (session is null) return null;
-        // The last system message with a ProposedEpicId is the most recent
-        // proposed spec. (SpecStore has it by id, but we recorded the
-        // issue id at propose-time, not the spec id. Re-link via issue.)
-        var lastProposal = session.Messages
-            .Where(m => m.ProposedEpicId is not null)
-            .OrderByDescending(m => m.Id)
-            .FirstOrDefault();
-        if (lastProposal?.ProposedEpicId is null) return null;
-        // The spec was created from the same epic; find the spec whose
-        // parent_issue_id matches.
-        var issue = await _issues.GetAsync(lastProposal.ProposedEpicId, ct);
-        if (issue is null) return null;
-        var specs = await _specs!.ListAsync(_projectId, status: null, ct);
-        return specs.FirstOrDefault(s => s.ParentIssueId == issue.Id);
-    }
-
-    private async Task<string> TouchesAsync(
-        string sessionId, string moduleId, string rationale, CancellationToken ct)
-    {
-        if (_specs is null) return "spec_store_unavailable";
-        if (string.IsNullOrWhiteSpace(moduleId))
-            return "module_id_required";
-        var spec = await MostRecentSpecAsync(sessionId, ct);
-        if (spec is null) return "no_recent_spec";
-        // Read existing touches (declare or auto) and add this one.
-        // SpecStore.PersistExtractionAsync will overwrite on next body
-        // update; for runtime additions we need a separate path. To
-        // keep this scope limited, we append a section to the spec
-        // body via UpdateBodyAsync and let the extractor pick it up.
-        // That's "extra work" but stays consistent with the source-
-        // of-truth-is-body contract.
-        await _specs.UpdateBodyAsync(spec.Id,
-            new UpdateSpecBody(spec.Body + $"\n\n## Touches\n- {moduleId}{(string.IsNullOrWhiteSpace(rationale) ? "" : "  \n    - " + rationale)}\n", spec.Author),
-            ct);
-        _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.spec.touched",
-            sessionId, $"spec={spec.Id} module={moduleId}",
-            new Dictionary<string, object?>
-            {
-                ["sessionId"] = sessionId,
-                ["specId"] = spec.Id,
-                ["moduleId"] = moduleId,
-            }));
-        return "ok";
-    }
-
-    private async Task<string> AddDependencyAsync(
-        string sessionId, string targetSpecId, string kind, string? rationale, CancellationToken ct)
-    {
-        if (_specs is null) return "spec_store_unavailable";
-        if (string.IsNullOrWhiteSpace(targetSpecId)) return "target_spec_required";
-        if (kind is not ("blocks" or "depends_on" or "related"))
-            return "kind_must_be_blocks_depends_on_or_related";
-        var spec = await MostRecentSpecAsync(sessionId, ct);
-        if (spec is null) return "no_recent_spec";
-        var targetExists = await _specs.GetAsync(targetSpecId, ct);
-        if (targetExists is null) return "target_spec_not_found";
-        // Same pattern as TouchesAsync: append a section to the body
-        // and let the extractor populate spec_dep.
-        var newSection = $"## Dependencies\n- {kind} {targetSpecId}{(string.IsNullOrWhiteSpace(rationale) ? "" : " — " + rationale)}\n";
-        var newBody = AppendSectionIfMissing(spec.Body, "Dependencies", newSection.TrimEnd('\n'));
-        await _specs.UpdateBodyAsync(spec.Id, new UpdateSpecBody(newBody, spec.Author), ct);
-        _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.spec.dep_added",
-            sessionId, $"from={spec.Id} to={targetSpecId} kind={kind}",
-            new Dictionary<string, object?>
-            {
-                ["sessionId"] = sessionId,
-                ["fromSpecId"] = spec.Id,
-                ["toSpecId"] = targetSpecId,
-                ["kind"] = kind,
-            }));
-        return "ok";
-    }
-
-    /// <summary>
-    /// Append a section to the body if it isn't already present.
-    /// If present, append an extra bullet to the existing section
-    /// rather than duplicating the heading.
-    /// </summary>
-    private static string AppendSectionIfMissing(string body, string headingName, string fullSection)
-    {
-        var marker = "## " + headingName;
-        if (body.Contains(marker, StringComparison.Ordinal))
-            return body.TrimEnd() + "\n\n" + fullSection.Substring(fullSection.IndexOf('\n') + 1);
-        return body.TrimEnd() + "\n\n" + fullSection;
+        return $"proposal {proposal.Id}, revision {proposal.Revision}; draft only, not approved";
     }
 
     private async Task<string> BuildIntakeInstructionsAsync(CancellationToken ct)
@@ -717,16 +444,19 @@ public sealed class IntakeAgent
             {projectLine}
 
             Your job: talk to the operator (the human) about what they want
-            to build. Ask clarifying questions. When the operator describes
-            a piece of work that is large enough to be a multi-task epic,
-            call `create_epic(title, description, priority?)` to propose it.
-            Do NOT propose epics for single tasks — those are dev tasks and
-            don't go through intake.
-
-            If the operator is being vague, ask. If they describe a single
-            task, suggest they file a dev task instead of an epic. If they
-            describe an epic, capture the title + description in the tool
-            call and confirm the proposal in your reply.
+            to build. Ask clarifying questions when intent or scope is unclear.
+            New initiatives of any size enter through Intake, including a small,
+            clearly scoped change. Call `create_epic(title, description, priority?)`
+            to capture the reviewed scope as a durable draft proposal.
+            To revise an existing draft, pass its stable proposalId and exact
+            expectedRevision. Never use title similarity as proposal identity.
+            Proposal creation and revision NEVER authorize execution; only
+            the operator can approve the exact current revision in the UI.
+            Do not require an artificial multi-task scope. Backlog task creation
+            is for remediation or work already within an approved initiative;
+            it is not a shortcut around approval for a new initiative.
+            Capture the operator's intended outcome, acceptance criteria and
+            boundaries in the proposal and confirm it remains unapproved.
 
             Sequence matters: when you have clarifying questions, call
             `ask_question` and STOP — never call `create_epic` in the
@@ -750,9 +480,9 @@ public sealed class IntakeAgent
             already answers (tech stack, layout, existing modules). Read
             it first; ask only about intent and scope.
 
-            ## Visual canvas
+            ## Conversation diagrams
 
-            The operator watches a visual canvas beside this chat. When
+            Diagrams can be opened alongside the working brief. When
             the discussion turns to structure — modules, flows, data
             flow, component relationships, user journeys — include ONE
             small mermaid diagram in your reply as a fenced block:
@@ -781,7 +511,7 @@ public sealed class IntakeAgent
     /// What the project IS: the operator's vision memory (when one
     /// exists) + a brief built from the local clone (stack, layout,
     /// README). Same vision keys as the groomer
-    /// (vision/&lt;projectId&gt;, fallback vision/master). Missing
+    /// (exact vision/&lt;projectId&gt;, owner-bound legacy fallback). Missing
     /// pieces degrade to explicit markers, never silence — a new
     /// project with no clone yet must not hallucinate a stack
     /// (observed live 2026-08-09: the talaria intake asked the
@@ -795,9 +525,8 @@ public sealed class IntakeAgent
         {
             try
             {
-                vision = (await _memory.RecallAsync($"vision/{_projectId}", ct)).FirstOrDefault()?.Body;
-                if (string.IsNullOrWhiteSpace(vision))
-                    vision = (await _memory.RecallAsync("vision/master", ct)).FirstOrDefault()?.Body;
+                vision = (await VisionMemory.ReadAsync(
+                    _memory, _projectId, _legacyVisionOwnerProjectId, ct))?.Body;
             }
             catch (Exception ex)
             {
@@ -852,27 +581,7 @@ public sealed class IntakeAgent
         _ => ChatRole.User,
     };
 
-    /// <summary>
-    /// The intake-draft body used when a new spec is created from
-    /// an accepted epic. The Product agent refines this into the
-    /// structured form (## Summary, ## Acceptance criteria, etc).
-    /// We seed it with the issue's title + description so Product
-    /// has material to work with even before the LLM runs.
-    /// </summary>
-    private static string BuildIntakeDraftBody(IssueRecord issue)
-    {
-        var sb = new System.Text.StringBuilder();
-        sb.Append("## Summary\n").Append(issue.Title).Append('\n');
-        if (!string.IsNullOrWhiteSpace(issue.Description))
-        {
-            sb.Append("\n## Notes\n").Append(issue.Description).Append('\n');
-        }
-        sb.Append("\n## Touches\n- TBD\n");
-        sb.Append("\n## Dependencies\n- none\n");
-        sb.Append("\n## Out of scope\n- TBD\n");
-        sb.Append("\n## Open questions\n- TBD\n");
-        return sb.ToString();
-    }
+
 }
 
 /// <summary>

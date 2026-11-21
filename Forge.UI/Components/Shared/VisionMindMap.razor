@@ -1,0 +1,211 @@
+@using Forge.Dashboard.Services
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
+<section class="vision-map" aria-label="Project vision mind map">
+    <div class="vision-map-toolbar">
+        <span>@FocusTitle</span>
+        <div class="vision-actions">
+            @if (_focus != "root")
+            {
+                <button class="btn btn--link" @onclick="GoUp">Up a level</button>
+                <button class="btn btn--link" @onclick="FullMap">Full map</button>
+            }
+            @if (Pending.Count > 0 && !_changesOnly)
+            {
+                <button class="btn btn--link" @onclick="ShowChanges">Affected ideas</button>
+            }
+            else if (_changesOnly)
+            {
+                <button class="btn btn--link" @onclick="FullMap">Full map</button>
+            }
+        </div>
+    </div>
+    <div class="vision-map-canvas" @ref="_canvas" role="group" aria-label="Connected ideas">
+        <svg class="vision-map-edges" aria-hidden="true"></svg>
+        @foreach (var item in MapItems)
+        {
+            <button type="button" class="vision-map-node @(item.Id == _focus ? "vision-map-node--focus" : "")"
+                    data-node="@item.Id" data-parent="@item.ParentId" data-change="@ChangeLabel(item.Id)"
+                    aria-pressed="@(SelectedId == item.Id)" @onclick="() => SelectAsync(item.Id)" @key="item.Id">
+                <span>@(item.Id == "root" ? RootTitle : DisplayTitle(item))</span>
+                @if (ChangeLabel(item.Id) is { } change)
+                {
+                    <small>@change</small>
+                }
+                else if (DescendantChanges(item.Id) > 0)
+                {
+                    <small>@DescendantChanges(item.Id) changed below</small>
+                }
+                else if (Children(item.Id).Count > 0)
+                {
+                    <small>@Children(item.Id).Count ideas</small>
+                }
+            </button>
+        }
+    </div>
+</section>
+
+@code {
+    [Parameter] public IReadOnlyList<VisionNodeDto> Nodes { get; set; } = [];
+    [Parameter] public IReadOnlyList<VisionEditDto> Pending { get; set; } = [];
+    [Parameter] public string RootTitle { get; set; } = "Project";
+    [Parameter] public string? SelectedId { get; set; }
+    [Parameter] public EventCallback<string> Selected { get; set; }
+    private ElementReference _canvas;
+    private IJSObjectReference? _module;
+    private string _focus = "root";
+    private bool _changesOnly;
+    private string _draftSignature = "";
+    private bool _disposed;
+    private List<VisionNodeDto> _all = [];
+    private bool _forgeOverview;
+    private string FocusTitle => _changesOnly ? "Affected ideas" : _focus == "root" ? "Whole project" : _all.FirstOrDefault(n => n.Id == _focus)?.Title ?? "Whole project";
+    private List<VisionNodeDto> Children(string id) => _all.Where(n => n.ParentId == id).ToList();
+    private string? ChangeLabel(string id)
+    {
+        if (id.StartsWith("draft:", StringComparison.Ordinal)) return "New";
+        return Pending.Any(e => e.NodeId == id && e.Operation != "add") ? "Edited" : null;
+    }
+    private HashSet<string> ChangedIds => Pending.Select((e, i) => e.Operation == "add" ? $"draft:{i}" : e.NodeId).ToHashSet(StringComparer.Ordinal);
+    private int DescendantChanges(string id)
+    {
+        var count = 0;
+        foreach (var changed in ChangedIds)
+        {
+            var current = _all.FirstOrDefault(n => n.Id == changed)?.ParentId;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            while (current is not null && seen.Add(current))
+            {
+                if (current == id) { count++; break; }
+                current = _all.FirstOrDefault(n => n.Id == current)?.ParentId;
+            }
+        }
+        return count;
+    }
+    private IReadOnlyList<VisionNodeDto> MapItems
+    {
+        get
+        {
+            if (_changesOnly)
+            {
+                var ids = ChangedIds;
+                foreach (var changed in ids.ToArray())
+                {
+                    var parent = _all.FirstOrDefault(n => n.Id == changed)?.ParentId;
+                    while (parent is not null && ids.Add(parent))
+                        parent = _all.FirstOrDefault(n => n.Id == parent)?.ParentId;
+                }
+                return _all.Where(n => ids.Contains(n.Id)).ToList();
+            }
+            if (_forgeOverview && _focus == "root")
+                return _all.Where(n => n.Id == "root" || n.ParentId == "root" || n.ParentId?.StartsWith("group:", StringComparison.Ordinal) == true).ToList();
+            return _all.Where(n => n.Id == _focus || n.ParentId == _focus).ToList();
+        }
+    }
+    protected override void OnParametersSet()
+    {
+        _all = Nodes.ToList();
+        AddForgeOverview();
+        for (var i = 0; i < Pending.Count; i++)
+        {
+            var edit = Pending[i];
+            if (edit.Operation == "add")
+                _all.Add(new($"draft:{i}", edit.NodeId, edit.Title ?? "New idea", edit.After));
+        }
+        if (!_all.Any(n => n.Id == _focus)) _focus = "root";
+        var signature = System.Text.Json.JsonSerializer.Serialize(Pending);
+        if (signature != _draftSignature)
+        {
+            _draftSignature = signature;
+            _changesOnly = Pending.Count > 0;
+            _focus = "root";
+        }
+    }
+    private void AddForgeOverview()
+    {
+        _forgeOverview = false;
+        var root = _all.FirstOrDefault(n => n.Id == "root");
+        if (root is null || !root.Title.Contains("Forge", StringComparison.OrdinalIgnoreCase)) return;
+        string[] headings = [
+            "1. What this system is and who it serves",
+            "2. Module map and non-negotiable boundaries",
+            "3. Core data + dispatch flows",
+            "4. Subsystem deep-dives",
+            "5. Cross-cutting constraints (the \"non-negotiables\" you will hit)",
+            "6. North-star direction",
+            "7. Reading order for newcomers",
+            "8. Where to file a follow-up",
+            "9. Cross-references"
+        ];
+        var sections = headings.Select(title => _all.FirstOrDefault(n => n.ParentId == "root" && n.Title == title)).ToArray();
+        if (sections.Any(n => n is null)) return;
+        var groups = new[] {
+            ("group:purpose", "Purpose & direction", new[] { 0, 5 }),
+            ("group:engineering", "Engineering principles", new[] { 1, 4 }),
+            ("group:work", "How Forge works", new[] { 2, 3 }),
+            ("group:references", "Working references", new[] { 6, 7, 8 })
+        };
+        foreach (var (id, title, indexes) in groups)
+        {
+            _all.Add(new(id, "root", title, ""));
+            foreach (var sectionIndex in indexes)
+            {
+                var section = sections[sectionIndex]!;
+                var index = _all.FindIndex(n => n.Id == section.Id);
+                _all[index] = section with { ParentId = id };
+            }
+        }
+        _forgeOverview = true;
+    }
+    private string DisplayTitle(VisionNodeDto node)
+    {
+        if (!_forgeOverview) return node.Title;
+        return node.Title switch
+        {
+            "1. What this system is and who it serves" => "Purpose & roles",
+            "2. Module map and non-negotiable boundaries" => "Module boundaries",
+            "3. Core data + dispatch flows" => "Data & dispatch",
+            "4. Subsystem deep-dives" => "Subsystems",
+            "5. Cross-cutting constraints (the \"non-negotiables\" you will hit)" => "Engineering rules",
+            "6. North-star direction" => "North star",
+            "7. Reading order for newcomers" => "Reading order",
+            "8. Where to file a follow-up" => "Follow-up work",
+            "9. Cross-references" => "Cross-references",
+            _ => node.Title
+        };
+    }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_disposed) return;
+        try
+        {
+            _module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./vision-map.js");
+            await _module.InvokeVoidAsync("layoutMap", _canvas);
+        }
+        catch (JSDisconnectedException) { }
+    }
+    private async Task SelectAsync(string id)
+    {
+        if (!_changesOnly && Children(id).Count > 0) _focus = id;
+        if (!id.StartsWith("group:", StringComparison.Ordinal))
+            await Selected.InvokeAsync(id);
+    }
+    private void GoUp()
+    {
+        _focus = _all.FirstOrDefault(n => n.Id == _focus)?.ParentId ?? "root";
+    }
+    private void FullMap() { _focus = "root"; _changesOnly = false; }
+    private void ShowChanges() { _focus = "root"; _changesOnly = true; }
+    public async ValueTask DisposeAsync()
+    {
+        _disposed = true;
+        if (_module is null) return;
+        try
+        {
+            await _module.InvokeVoidAsync("disposeMap", _canvas);
+            await _module.DisposeAsync();
+        }
+        catch (JSDisconnectedException) { }
+    }
+}

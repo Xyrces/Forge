@@ -1,0 +1,84 @@
+{
+  "fixture": "Deployed sprint board: manual browser qualification inputs",
+  "scope": "Expected observations only. Collect browser results separately from serving-revision proof, reviews, CI, and merge evidence.",
+  "inputs": {
+    "route": "{dashboardOrigin}/sprints?project={projectId}&sprint={sprintId}",
+    "runContext": "Use the operator-authorized deployment, project, active sprint with a goal, qualification task and its linked PR, and the intended human role. Substitute the actual IDs and URL-encode the query values.",
+    "servingRevision": "Link independent evidence that the running workload serves the intended release. Recheck if routing or the running image changes; do not combine captures across unverified revisions."
+  },
+  "beforeEachViewport": [
+    "Set browser page zoom to 100%. Set the CSS viewport to the profile dimensions and verify window.innerWidth and window.innerHeight; screenshot dimensions are not viewport measurements.",
+    "Open the sprint route and wait for the named project, active sprint, and task board to load. Record the member page; use Previous tasks or Next tasks if needed to reach the qualification card."
+  ],
+  "lanes": [
+    { "name": "Queued", "desktop": "D2", "mobile": "M1" },
+    { "name": "Running", "desktop": "D3", "mobile": "M2" },
+    { "name": "Review", "desktop": "D4", "mobile": "M3" },
+    { "name": "Needs you", "desktop": "D5", "mobile": "M4" },
+    { "name": "Completed / closed", "desktop": "D6", "mobile": "M5" }
+  ],
+  "desktop": {
+    "viewportCssPx": { "width": 1280, "height": 900 },
+    "mode": "Desktop browsing, no mobile emulation; sidebar open",
+    "layout": {
+      "id": "D1",
+      "steps": "Open the sidebar with Toggle navigation if needed. Capture the sidebar, sprint goal and Sprint task board. Use consecutive captures if vertical scrolling is needed, but capture the entire lane row together at the same width and sidebar state. Do not scroll horizontally to bring lanes into view.",
+      "measurements": [
+        "In browser devtools, record getBoundingClientRect() for the main panel (.app-main), the board (#sprint-tasks), and all five direct .sprint-lane children in board order. Compare lane top edges to check for wrapping and compare left/right edges with the board, main panel and usable viewport (0 to document.documentElement.clientWidth).",
+        "For every rendered .sprint-task in a populated lane, compare its getBoundingClientRect() left/right edges with that lane's left/right edges. Checking only document width can miss a clipped card.",
+        "Record scrollWidth and clientWidth on document.scrollingElement, the main panel and the board to check for horizontal overflow."
+      ],
+      "expected": "The goal sits above the board in a separate vertical band. With the sidebar open, all five lanes fit side by side in the listed order on one row: their tops align, their widths are nonzero, and they do not overlap. The board and every lane fit horizontally within the visible main area and viewport. Every populated card stays within its lane. None of the measured containers has scrollWidth greater than clientWidth. Wrapping, clipping or needing horizontal scroll fails D1 even if each lane can be reached separately."
+    },
+    "laneCheck": {
+      "steps": "Use Jump to task cards. For each desktop checkpoint in lanes, reach the named heading. Open a card by its title and return to the board; if the lane is empty on this page, inspect its empty state.",
+      "expected": "Each heading and its linked card or No tasks in this lane message is readable and not clipped. Where a card exists, its title opens the matching task in the same project."
+    }
+  },
+  "mobile": {
+    "viewportCssPx": { "width": 390, "height": 844 },
+    "mode": "Responsive mobile emulation; close the navigation overlay if open",
+    "laneCheck": {
+      "steps": "For each mobile checkpoint in lanes, select the named option in Task lane (ignore its count suffix), then scroll to the heading and a card or empty state before returning to the picker.",
+      "expected": "The selected lane can be reached and its heading and card or No tasks in this lane message are readable without clipping."
+    },
+    "reviewChecks": [
+      {
+        "id": "R1",
+        "steps": "In the active sprint, find the nonterminal qualification card in its current lane and expand Task actions. Inspect the hold control without pressing it.",
+        "expected": "The control is readable and reachable when offered to the role: Require review by @{nominee} before a task hold (Require human review if no nominee is configured), or Release additional review hold while the task hold is present. A held card identifies who must review when a nominee is configured."
+      },
+      {
+        "id": "R2",
+        "steps": "On the linked card, follow Review PR #{number} ↗ when awaiting human review, or Open PR #{number} ↗ otherwise. Capture the GitHub handoff without submitting a decision.",
+        "expected": "The visible PR link opens the exact qualification PR in a new tab."
+      },
+      {
+        "id": "R3",
+        "steps": [
+          "At 390 CSS px, use Task lane to select the non-Queued lane containing the qualification card. Use Next tasks if needed and record the page number from the first member page. Expand Task actions, Tab to Open task history and position the card in view. Use a starting scroll offset greater than 16 CSS px in the main panel or window so a reset to the top cannot pass.",
+          "Before pressing Enter, record the project and selected sprint, Task lane value, member page (page number, Showing count and first/last card links in this lane), and the originating card's title and task URL. Record .app-main.scrollTop (the main panel's scrollTop), window.scrollY, and getBoundingClientRect().top for the originating .sprint-task. Capture the board and focused link.",
+          "Press Enter on Open task history. On task detail, open History & runs and Review. Where original review sources exist, expand the inline discussion and follow the available original review or exact discussion link without posting; return to the task tab if a link opened a new tab.",
+          "Use browser Back from task detail in the original tab. Wait for the board and completion panel above it to finish loading. Without scrolling, tabbing or reselecting anything on the board, capture the restored state, record document.activeElement and repeat the same offset and card-position measurements. If the task or board data changed independently during the trip, record the obstruction rather than treating the comparison as a pass."
+        ],
+        "expected": "The matching task opens in the same project and its history, Review and any available source links are reachable. Browser Back restores the same project, sprint, lane, member page and originating card. Keyboard focus lands on that card's title link, matching its recorded task URL. The card is still in view; each scroll offset and the card's viewport-relative top differ from the baseline by no more than 16 CSS px. A reset to Queued or the top, wrong page, lost focus or out-of-tolerance shift fails R3."
+      },
+      {
+        "id": "R4",
+        "steps": "On task detail, expand Task actions when the acting role is allowed to manage the nonterminal task. Inspect the task hold control without pressing it.",
+        "expected": "The control is readable and reachable when offered: Require review by @{nominee} for this task (Require human review for this task if no nominee is configured), or Release task review hold while the task hold is present."
+      }
+    ],
+    "stateNotes": "Record each additional review action offered to the acting role, with its exact label, path and safe destination or prompt. For disabled or absent controls, record the sprint/task/PR state and role rather than counting them as reached. Observe naturally available states; do not create or undo a hold, submit a review, or alter policy for a capture."
+  },
+  "captureFields": [
+    "checkpoint and original capture reference",
+    "UTC timestamp and independent serving-revision evidence reference",
+    "dashboard route, project, sprint and sprint state",
+    "task and PR state when relevant",
+    "acting human role",
+    "browser and version, measured CSS width and height, zoom/emulation and sidebar state",
+    "lane or exact action label, member page and interaction steps",
+    "expected and observed result, including clipping, disabled state or other obstruction"
+  ]
+}

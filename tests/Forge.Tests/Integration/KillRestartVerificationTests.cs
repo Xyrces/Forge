@@ -22,8 +22,8 @@ namespace Forge.Tests.Integration;
 /// (commit on the branch) and then the process dies
 /// (SIGKILL, power loss, anything). The
 /// <c>StartupRecovery</c> pass on the next launch should
-/// replay the unfinished side-effects: push the branch
-/// and open the PR.
+/// requeue unfinished work through the normal verification and
+/// publication stages, preserving the branch and edits.
 /// </para>
 ///
 /// <para>
@@ -115,11 +115,10 @@ public class KillRestartVerificationTests : IDisposable
     /// files were written to the worktree, a commit was made
     /// on the local branch, then the process died before push
     /// or PR-open. Recovery should: detect the commit_done
-    /// state, push the branch, open the PR, and update the
-    /// issue's checkpoint to pr_opened.
+    /// state and requeue without publishing unverified work.
     /// </summary>
     [Fact]
-    public async Task KillAfterCommitBeforePush_RecoveryPushesAndOpensPr()
+    public async Task KillAfterCommitBeforePush_RecoveryPreservesWorkForVerifiedDispatch()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Inventory HUD"));
         await _issues.ClaimAsync(issue.Id, "forge");
@@ -153,39 +152,36 @@ public class KillRestartVerificationTests : IDisposable
         // issue further; the DB row sits at InProgress +
         // commit_done + (no prNumber).
 
+        var committedSha = await _worktrees.GetHeadShaAsync(worktreePath);
         // Phase 4: orchestrator restarts. StartupRecovery runs.
         var reportId = await _recovery.RunAsync();
         var report = (await _reports.GetAsync(reportId))!;
         _out.WriteLine($"Report: scanned={report.IssuesScanned} replayed={report.IssuesReplayed} failed={report.IssuesFailed}");
 
         Assert.Equal(1, report.IssuesScanned);
-        Assert.Equal(1, report.IssuesReplayed);
+        Assert.Equal(0, report.IssuesReplayed);
         Assert.Equal(0, report.IssuesFailed);
 
-        // Verify the side-effects ran:
-        Assert.True(await CheckRemoteBranchAsync(_workDir, branch), "branch should be on remote after recovery");
-        Assert.Single(_gitHub.Calls);
-        Assert.Equal(branch, _gitHub.Calls[0].Head);
-        Assert.Equal("main", _gitHub.Calls[0].Base);
-        Assert.Contains("Inventory HUD", _gitHub.Calls[0].Title);
-
-        // Verify the issue's state advanced to pr_opened + prNumber recorded.
+        // Recovery cannot publish work without the normal verification gate.
+        Assert.False(await CheckRemoteBranchAsync(_workDir, branch));
+        Assert.Empty(_gitHub.Calls);
         var after = (await _issues.GetAsync(issue.Id))!;
-        Assert.Equal(DispatchCheckpoint.PrOpened, after.DispatchCheckpoint);
-        Assert.Equal(1234, int.Parse(after.GetMetadata("prNumber")!));
-        Assert.Equal(1, after.RecoveryAttempts);
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal(DispatchCheckpoint.CommitDone, after.DispatchCheckpoint);
+        Assert.Null(after.GetMetadata("prNumber"));
+        Assert.Equal(branch, after.GetMetadata("branch"));
+        Assert.Equal("agent output", await File.ReadAllTextAsync(Path.Combine(worktreePath, "edit.txt")));
+        Assert.Equal(committedSha, await _worktrees.GetHeadShaAsync(worktreePath));
+
     }
 
     /// <summary>
     /// Simulate: orchestrator pushed the branch but crashed
-    /// before opening the PR. Recovery should: open the PR
-    /// using the already-pushed branch (no second push
-    /// needed). Git is idempotent on the push so a no-op
-    /// push is also acceptable; the contract is "PR is
-    /// opened with the right head branch".
+    /// before opening the PR. Recovery should preserve the remote
+    /// branch and requeue for verified dispatch without creating a PR.
     /// </summary>
     [Fact]
-    public async Task KillAfterPushBeforePr_RecoveryOpensPrWithoutPushingAgain()
+    public async Task KillAfterPushBeforePr_RecoveryRequeuesWithoutUnverifiedPr()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Wiring"));
         await _issues.ClaimAsync(issue.Id, "forge");
@@ -215,12 +211,15 @@ public class KillRestartVerificationTests : IDisposable
         // Recover.
         var reportId = await _recovery.RunAsync();
         var report = (await _reports.GetAsync(reportId))!;
-        Assert.Equal(1, report.IssuesReplayed);
-        Assert.Equal(1, _gitHub.Calls.Count);
+        Assert.Equal(0, report.IssuesReplayed);
+        Assert.Empty(_gitHub.Calls);
 
         var after = (await _issues.GetAsync(issue.Id))!;
-        Assert.Equal(DispatchCheckpoint.PrOpened, after.DispatchCheckpoint);
-        Assert.Equal(1234, int.Parse(after.GetMetadata("prNumber")!));
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal(DispatchCheckpoint.PushDone, after.DispatchCheckpoint);
+        Assert.Null(after.GetMetadata("prNumber"));
+        Assert.True(await CheckRemoteBranchAsync(_workDir, branch));
+        Assert.Equal("agent output", await File.ReadAllTextAsync(Path.Combine(worktreePath, "edit.txt")));
     }
 
     /// <summary>

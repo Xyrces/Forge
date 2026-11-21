@@ -34,6 +34,7 @@ public sealed class BashTool
     private readonly IReadOnlyDictionary<string, string>? _envVars;
     private readonly Func<bool>? _mutationsAllowed;
     private readonly string? _mutationRefusalMessage;
+    private readonly bool _publicationForbidden;
 
     /// <param name="envVars">
     /// Extra environment variables injected into every spawned
@@ -54,7 +55,7 @@ public sealed class BashTool
     /// </param>
     public BashTool(string workingDirectory, TimeSpan? defaultTimeout = null, ILogger<BashTool>? logger = null,
         IReadOnlyDictionary<string, string>? envVars = null, Func<bool>? mutationsAllowed = null,
-        string? mutationRefusalMessage = null)
+        string? mutationRefusalMessage = null, bool publicationForbidden = false)
     {
         _workingDirectory = workingDirectory;
         _defaultTimeout = defaultTimeout ?? TimeSpan.FromSeconds(30);
@@ -62,6 +63,7 @@ public sealed class BashTool
         _envVars = envVars;
         _mutationsAllowed = mutationsAllowed;
         _mutationRefusalMessage = mutationRefusalMessage;
+        _publicationForbidden = publicationForbidden;
     }
 
     public string WorkingDirectory => _workingDirectory;
@@ -80,6 +82,11 @@ public sealed class BashTool
     {
         if (string.IsNullOrWhiteSpace(command))
             return "exit=-1\nstdout:\nstderr: command is required";
+
+        // Independent of plan approval: the worker host verifies first,
+        // then the controller owns remote publication.
+        if (_publicationForbidden && WorkerPublicationPolicy.IsPublication(command))
+            return "exit=-1\nstdout:\nstderr: REFUSED — worker publication is disabled. Finish local edits and tests, then return your summary. The host verifies and the controller commits/pushes/opens the PR. Do not publish through scripts or alternate tools.";
 
         // Plan gate (hard enforcement): mutating commands are
         // refused until submit_plan returns approved. Read/explore/
@@ -136,6 +143,15 @@ public sealed class BashTool
                 StandardErrorEncoding = Encoding.UTF8,
             };
 
+        var inheritedSecrets = psi.Environment.ToArray();
+        // Runtime configuration may arrive via environment in non-container deployments.
+        foreach (var key in psi.Environment.Keys.Where(k =>
+            k.StartsWith("Llm__", StringComparison.OrdinalIgnoreCase)
+            || k.StartsWith("Db__", StringComparison.OrdinalIgnoreCase)
+            || k.StartsWith("Budget__", StringComparison.OrdinalIgnoreCase)
+            || k is "OPENAI_API_KEY" or "LLM_API_KEY" or "AZURE_CLIENT_SECRET").ToArray())
+            psi.Environment.Remove(key);
+
         // Secrets-by-reference: inject per-project env vars
         // (FORGE_SECRET_*, GITHUB_TOKEN, ...) so the model can use
         // them in commands without the values entering its context.
@@ -147,38 +163,59 @@ public sealed class BashTool
             }
         }
 
-        _logger?.LogInformation("BashTool: cwd={Cwd} cmd={Cmd} timeout={Timeout}s", cwd, command, (int)timeout.TotalSeconds);
+        var redactor = new ToolSecretRedactor(inheritedSecrets.Concat(psi.Environment));
+        _logger?.LogInformation("BashTool: cwd={Cwd} cmd={Cmd} timeout={Timeout}s", cwd, redactor.Redact(command), (int)timeout.TotalSeconds);
 
         using var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
-        proc.OutputDataReceived += (_, e) => { if (e.Data is not null) stdout.AppendLine(e.Data); };
-        proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
+
 
         try
         {
             if (!proc.Start())
                 return "exit=-1\nstdout:\nstderr: failed to start cmd.exe";
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
+            var outputRead = ReadBoundedAsync(proc.StandardOutput, stdout);
+            var errorRead = ReadBoundedAsync(proc.StandardError, stderr);
             using var timeoutCts = new CancellationTokenSource(timeout);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
             try
             {
                 await proc.WaitForExitAsync(linkedCts.Token);
+                await Task.WhenAll(outputRead, errorRead);
             }
-            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+            catch (OperationCanceledException)
             {
-                try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
-                return $"exit=-1\nstdout:\n{stdout}\nstderr: timed out after {(int)timeout.TotalSeconds}s\n{stderr}";
+                try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); }
+                catch (InvalidOperationException ex) { _logger?.LogDebug(ex, "Shell exited during cancellation"); }
+                await proc.WaitForExitAsync(CancellationToken.None);
+                await Task.WhenAll(outputRead, errorRead);
+                ct.ThrowIfCancellationRequested();
+                return redactor.Redact($"exit=-1\nstdout:\n{stdout}\nstderr: timed out after {(int)timeout.TotalSeconds}s\n{stderr}");
             }
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            return $"exit=-1\nstdout:\n{stdout}\nstderr: {ex.GetType().Name}: {ex.Message}";
+            return redactor.Redact($"exit=-1\nstdout:\n{stdout}\nstderr: {ex.GetType().Name}: {ex.Message}");
         }
 
-        return $"exit={proc.ExitCode}\nstdout:\n{stdout}\nstderr:\n{stderr}";
+        return redactor.Redact($"exit={proc.ExitCode}\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    }
+
+    private static async Task ReadBoundedAsync(StreamReader reader, StringBuilder destination)
+    {
+        const int limit = 65536;
+        var buffer = new char[4096];
+        var truncated = false;
+        int count;
+        while ((count = await reader.ReadAsync(buffer)) > 0)
+        {
+            var keep = Math.Min(count, Math.Max(0, limit - destination.Length));
+            destination.Append(buffer, 0, keep);
+            truncated |= keep < count;
+        }
+        if (truncated) destination.Append("\n[output truncated at 65536 characters]");
     }
 
     /// <summary>
@@ -189,8 +226,9 @@ public sealed class BashTool
     public AIFunction AsAIFunction() => AIFunctionFactory.Create(
         ([Description("The command to run. On Windows, this is passed to `cmd.exe /c`. Use `dir` instead of `ls`, `type` instead of `cat`, etc.")] string command,
          [Description("Optional working directory override. Defaults to the task's worktree.")] string? workingDirectory = null,
-         [Description("Optional timeout in seconds. Defaults to 30. Max 300.")] int? timeoutSeconds = null)
-            => Bash(command, workingDirectory, timeoutSeconds, CancellationToken.None),
+         [Description("Optional timeout in seconds. Defaults to 30. Max 300.")] int? timeoutSeconds = null,
+         CancellationToken cancellationToken = default)
+            => Bash(command, workingDirectory, timeoutSeconds, cancellationToken),
         name: "bash",
         description: "Run a shell command in the agent's working directory. Returns exit code + combined stdout/stderr.");
 }

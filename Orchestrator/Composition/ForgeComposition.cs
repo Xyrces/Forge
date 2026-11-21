@@ -1,3 +1,4 @@
+using Forge.Core.Initiatives;
 using Forge.Agents;
 using Forge.AgentTools;
 using Forge.Codebase;
@@ -45,7 +46,8 @@ public sealed record ForgeProjectBootstrap(
 public static class ForgeComposition
 {
     public static async Task<ServiceProvider> BuildAsync(
-        AgentOptions options, ILoggerFactory loggerFactory, CancellationToken ct = default)
+        AgentOptions options, ILoggerFactory loggerFactory, CancellationToken ct = default,
+        Func<CancellationToken, Task>? admission = null)
     {
         var (knownProjects, orchDbByProject, orchDataRoot, projectStore, cloner, secretStore) =
             Program.BuildProjectBootstrap(options, loggerFactory);
@@ -95,8 +97,9 @@ public static class ForgeComposition
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.TaskEnqueuedConsumer>());
         var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
             (pid, path) => Program.FactoryFor(options.Db, pid, path),
-            events: eventPublisher);
+            events: eventPublisher, deploymentProfiles: options.Deployments);
         services.AddSingleton(projectFactory);
+        await projectFactory.PreserveArtifactHistoryAsync(null, ct);
         string? ProjectRootLookup(string projectId) =>
             projectFactory.KnownProjects
                 .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
@@ -116,7 +119,7 @@ public static class ForgeComposition
         services.AddSingleton(issues);
         services.AddSingleton<IIssueStore>(issues);
         var registryIssues = new IssueStore(
-            ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDb));
+            ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDb, options.Db.AutoMigrate));
         var agents = new AgentStore(registryIssues);
         services.AddSingleton(agents);
         services.AddSingleton<IAgentStore>(agents);
@@ -128,6 +131,8 @@ public static class ForgeComposition
         services.AddSingleton<ISprintStore>(sprints);
         var messageBus = new AgentMessageBus();
         services.AddSingleton(messageBus);
+        var gitHub = Program.BuildGitHubService(
+            options.GitHub ?? new GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
         var worktrees = new GitWorktreeService(
             new WorkspaceOptions
             {
@@ -136,10 +141,10 @@ public static class ForgeComposition
                 DefaultBranch = options.Workspace.DefaultBranch,
             },
             loggerFactory.CreateLogger<GitWorktreeService>(),
-            githubToken: options.GitHub?.Token);
+            githubToken: gitHub.UsesAppIdentity ? null : options.GitHub?.Token,
+            publisherToken: gitHub.UsesAppIdentity ? gitHub.GetPublisherTokenAsync : null,
+            publisherRepository: $"https://github.com/{gitHub.Owner}/{gitHub.Repo}");
         services.AddSingleton(worktrees);
-        var gitHub = Program.BuildGitHubService(
-            options.GitHub ?? new GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
         services.AddSingleton(gitHub);
         var roleRegistry = new RoleAgentRegistry();
         services.AddSingleton(roleRegistry);
@@ -185,6 +190,19 @@ public static class ForgeComposition
         services.AddSingleton(workflowResolver);
         var stageGates = new StageGates(memoryStore, workflowResolver);
         services.AddSingleton(stageGates);
+        services.AddSingleton<Forge.Deploy.DeploymentExecutorFactory>();
+        services.AddSingleton<Forge.Deploy.IRoutineReleaseSource>(_ => new Forge.Deploy.TrustedGitHubReleaseSource(
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
+            (project, ct) => GitHubTokenResolver.ResolveReleaseTokenAsync(project, options.GitHub, secretStore, ct),
+            () => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "source-revision"))));
+        services.AddSingleton(provider => new Forge.Deploy.RoutineDeploymentCoordinator(
+            () => projectFactory.KnownProjects.Select(project => projectFactory.Find(project.Id))
+                .Where(context => context is not null).Select(context => new Forge.Deploy.RoutineDeploymentProject(
+                    context!.Options, new Core.Completion.SprintCompletionStore((IssueStore)context.Issues), context.Deployments)).ToArray(),
+            provider.GetRequiredService<Forge.Deploy.IRoutineReleaseSource>(),
+            project => (Forge.Deploy.IIndependentDeploymentExecutor)provider.GetRequiredService<Forge.Deploy.DeploymentExecutorFactory>().Create(project)!,
+            stageGates, loggerFactory.CreateLogger<Forge.Deploy.RoutineDeploymentCoordinator>(), wakeups.Deploy));
 
         var issuesJsonlPath = Path.Combine(primaryStateDir, "issues.jsonl");
         var jsonlMirror = new IssuesJsonlMirror(issues, issuesJsonlPath,
@@ -208,16 +226,35 @@ public static class ForgeComposition
         services.AddSingleton(vision);
         var rolePromptsRoot = RolePromptRoot.Resolve(primary.Root);
         log.LogInformation("Role prompts root: {RolePromptsRoot}", rolePromptsRoot);
-        var visionSnapshot = vision.Reload();
+        vision.Reload();
+        // Operator edits belong to the project's durable database, never its Git checkout.
+        // Rebuild prompt projections from that authority rather than overwrite them from an
+        // older repository import when the controller restarts or a release is deployed.
+        var projectVisions = new ProjectVisionDocuments(vision, projectFactory, memoryStore);
+        var primaryVision = projectVisions.Find(primary.Id)
+            ?? throw new InvalidOperationException($"Unknown primary vision project {primary.Id} during bootstrap.");
+        var visionSnapshot = await projectVisions.RefreshAsync(primaryVision, ct);
         if (visionSnapshot.Exists)
         {
             log.LogInformation("Vision loaded from {Path} ({Len} chars)",
                 visionSnapshot.Path, visionSnapshot.Content.Length);
-            await memoryStore.RememberAsync("vision/master", visionSnapshot.Content, ttlDays: null, ct);
         }
         else
         {
             log.LogWarning("Vision file not found at {Path}; dashboard Vision tab will be empty", visionSnapshot.Path);
+        }
+        foreach (var project in knownProjects.Where(project => project.Id != primary.Id))
+        {
+            try
+            {
+                var document = projectVisions.Find(project.Id)
+                    ?? throw new InvalidOperationException($"Unknown vision project {project.Id} during bootstrap.");
+                await projectVisions.RefreshAsync(document, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                log.LogError(ex, "Could not refresh vision guidance for project {ProjectId}; retry its Vision Refresh after repairing the project", project.Id);
+            }
         }
 
         var skillBootstrap = new SkillBootstrap(
@@ -248,6 +285,9 @@ public static class ForgeComposition
         ProviderApiKeyResolver? providerKeyResolver = null;
         if (chatClientFactory is OpenAICompatibleChatClientFactory openAiFactory)
         {
+            if (options.Controller.Enabled)
+                openAiFactory.RequestPolicy = Control.BudgetRequestPolicy.Create(options,
+                    registryIssues.Db, admission ?? (_ => throw new InvalidOperationException("Controller admission guard is required.")));
             openAiFactory.Overrides = roleModelOverrides;
             openAiFactory.RateLimits = modelRateLimits;
             openAiFactory.MaxConcurrentRequests = options.Llm.MaxConcurrentRequests;
@@ -275,7 +315,7 @@ public static class ForgeComposition
         services.AddSingleton(sprintProposalAudit);
         var scorer = new DeterministicScorer();
         services.AddSingleton(scorer);
-        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit);
+        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit, gates: stageGates, planning: options.SprintPlanning, roleCaps: primary.Roles, projectOptions: primary);
         services.AddSingleton(sprintPropose);
         var memoryExtractor = new MemoryExtractor(
             chatClientFactory, llmConfig, memoryStore,
@@ -286,7 +326,7 @@ public static class ForgeComposition
         services.AddSingleton(specStoreRef);
 
         MafAgentRunner.DiagnosticLogPath = Path.Combine(orchDataRoot, "logs", "agent.log");
-        var agentRunner = new MafAgentRunner(
+        var localAgentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
@@ -297,6 +337,7 @@ public static class ForgeComposition
                 .FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase))
                 ?.VerifyCommands,
             memory: memoryStore,
+            legacyVisionOwnerProjectId: visionSnapshot.Exists ? primary.Id : null,
             handoffs: new ContextHandoffStore(primaryFactory),
             designArtifacts: () => designArtifacts,
             specs: () => specStoreRef.Value,
@@ -311,13 +352,32 @@ public static class ForgeComposition
                 : projectFactory.Find(pid) is { } runCtx
                     ? new AgentRunStore(((IssueStore)runCtx.Issues).Db)
                     : agentRunStore,
-            // file_followup rows belong to the RUN's project store.
+            // Follow-ups and engineering artifact reads use the RUN's project store.
             issueStoreLookup: pid => pid is null
                 ? null
                 : projectFactory.Find(pid)?.Issues,
             modelOverrides: roleModelOverrides,
-            gates: options.Gates);
-        services.AddSingleton(agentRunner);
+            gates: options.Gates,
+            artOutputRoot: id => ForgesystemPaths.ArtistOutputRoot(orchDataRoot, id,
+                id == "default" ? ProjectRootLookup(id) : null));
+        IAgentRunner agentRunner = localAgentRunner;
+        if (!options.Worker.Enabled && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+            throw new InvalidOperationException("GitHub App credentials require isolated Kubernetes workers.");
+        if (options.Worker.Enabled)
+        {
+            if (!options.Controller.Enabled || !options.Db.IsSqlServer || admission is null)
+                throw new InvalidOperationException("Kubernetes workers require the SQL-backed controller admission guard.");
+            var kubeClient = Workers.KubernetesWorkerJobs.CreateInClusterClient();
+            services.AddSingleton(kubeClient);
+            var workerAttempts = new Core.Execution.WorkerAttemptStore(registryIssues.Db);
+            services.AddSingleton(new Workers.VerificationJobEvents(kubeClient, options.Worker.Namespace,
+                options.Controller.DatasetId, workerAttempts.GetAsync, eventPublisher,
+                loggerFactory.CreateLogger<Workers.VerificationJobEvents>()));
+            agentRunner = new Workers.KubernetesAgentRunner(
+                workerAttempts,
+                new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission);
+        }
+        services.AddSingleton(localAgentRunner);
         services.AddSingleton<IAgentRunner>(agentRunner);
         var eventBus = new InMemoryDashboardEventBus();
         services.AddSingleton(eventBus);
@@ -328,6 +388,8 @@ public static class ForgeComposition
         services.AddSingleton(lifecycle);
 
         // P4 Stage B — pick the workflow runtime based on appsettings.json.
+        var slots = Program.BuildSlotTable(knownProjects);
+        services.AddSingleton(slots);
         IWorkflowDispatcher dispatcher;
         if (string.Equals(options.Orchestrator.Execution, "Durable", StringComparison.OrdinalIgnoreCase))
         {
@@ -341,7 +403,8 @@ public static class ForgeComposition
                 timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
                 lifecycle: lifecycle,
                 workflow: workflowResolver,
-                verifyCommands: primary.VerifyCommands)
+                verifyCommands: primary.VerifyCommands,
+                sprints: new SprintStore(issues), reviewSlots: slots)
                 .Build();
             var durableServices = new ServiceCollection()
                 .AddSingleton(workflow)
@@ -372,8 +435,10 @@ public static class ForgeComposition
                         loggerFactory: loggerFactory,
                         sprints: bundle.Sprints,
                         timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
+                        lifecycle: lifecycle,
                         workflow: workflowResolver,
                         verifyCommands: bundle.Project.VerifyCommands,
+                        reviewSlots: slots,
                         // Message-driven review trigger: publish
                         // PrOpened — the PrOpenedConsumer launches the
                         // background review on the pushed head while CI
@@ -397,12 +462,17 @@ public static class ForgeComposition
         }
         services.AddSingleton(dispatcher);
 
+        Func<string, string, CancellationToken, Task<bool>>? hasDurableWorker = options.Worker.Enabled
+            ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
+                .HasActiveAsync(options.Controller.DatasetId, projectId, taskId, ct)
+            : null;
         var dispatchBundleFactory = new ProjectDispatchBundleFactory(
             options, orchDataRoot, projectStore, cloner,
             agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory,
             secrets: secretStore, gates: stageGates, lifecycle: lifecycle,
-            eventPublisher: eventPublisher);
+            eventPublisher: eventPublisher, hasDurableWorker: hasDurableWorker);
         services.AddSingleton(dispatchBundleFactory);
+        services.AddSingleton<IProjectDispatchBundleFactory>(dispatchBundleFactory);
 
         // Watch pipeline + scheduler triggers: ONE consumer per topic
         // (the in-memory transport is competing-consumer) fanning out
@@ -430,6 +500,19 @@ public static class ForgeComposition
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.SprintStatusChangedConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SprintStatusChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.TaskStatusChangedConsumer(
+            sp.GetRequiredService<ITransport>(), sp.GetRequiredService<Consumers.SchedulerWakeups>(),
+            sp.GetRequiredService<ILogger<Consumers.TaskStatusChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.TaskStatusChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.SprintOutcomeChangedConsumer(
+            sp.GetRequiredService<ITransport>(), sp.GetRequiredService<Consumers.SchedulerWakeups>(),
+            sp.GetRequiredService<ILogger<Consumers.SprintOutcomeChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SprintOutcomeChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.PrWatchRequestedConsumer(
+            sp.GetRequiredService<ITransport>(), sp.GetRequiredService<IProjectDispatchBundleFactory>(),
+            sp.GetRequiredService<IProjectStore>(), sp.GetRequiredService<WatchSweepService>(),
+            sp.GetRequiredService<ILogger<Consumers.PrWatchRequestedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.PrWatchRequestedConsumer>());
         services.AddSingleton(sp => new Consumers.FollowUpFiledConsumer(
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.FollowUpFiledConsumer>>()));
@@ -490,8 +573,6 @@ public static class ForgeComposition
             }
         }
 
-        var slots = Program.BuildSlotTable(knownProjects);
-        services.AddSingleton(slots);
         var orchestrator = new OrchestratorAgent(
             projectStore,
             dispatchBundleFactory,
@@ -509,6 +590,12 @@ public static class ForgeComposition
         orchestrator.TaskEscalations = taskModelEscalations;
         services.AddSingleton(orchestrator);
 
+        var initiativeProposals = new InitiativeProposalStore(issues);
+        InitiativeIngestionStore IngestionForProject(string id) => new(
+            projectFactory.Find(id)?.Issues as IssueStore
+                ?? throw new InvalidOperationException($"Unknown initiative project {id}"));
+        var initiativeApprovals = new InitiativeApprovalService(initiativeProposals, IngestionForProject, eventBus);
+        services.AddSingleton(initiativeApprovals);
         var intakeStore = new IntakeStore(issues);
         services.AddSingleton(intakeStore);
         services.AddSingleton<IIntakeStore>(intakeStore);
@@ -525,7 +612,8 @@ public static class ForgeComposition
                 .Select(proj => projectFactory.Find(proj.Id)?.Specs)
                 .Where(st => st is not null)
                 .Cast<ISpecStore>()
-                .ToList());
+                .ToList(),
+            initializedHistoryStores: () => projectFactory.GetInitializedHistoryStores(specStore));
         services.AddSingleton(routingSpecStore);
         specStoreRef.Set(routingSpecStore);
 
@@ -549,8 +637,11 @@ public static class ForgeComposition
                 // + vision the intake asks the operator about the tech
                 // stack — facts the codebase already answers.
                 projectRootLookup: ProjectRootLookup,
-                memory: memoryStore));
+                memory: memoryStore, initiatives: initiativeApprovals,
+                legacyVisionOwnerProjectId: visionSnapshot.Exists ? primary.Id : null));
         services.AddSingleton(intakeRegistry);
+        services.AddSingleton<IVisionConversation>(new VisionConversation(
+            chatClientFactory, llmConfig, loggerFactory.CreateLogger<VisionConversation>()));
 
         var specExtractionReader = new SpecExtractionReader(issues);
         services.AddSingleton<ISpecExtractionReader>(specExtractionReader);
@@ -566,16 +657,54 @@ public static class ForgeComposition
             roleRegistry, eventBus, skillSource, loggerFactory,
             rolePromptsRoot);
         services.AddSingleton(productAgentFactory);
-        // Self-starts in its ctor (event subscription + worker task).
+        // Program starts and joins this queue only after controller admission is ready.
         var productRefinementQueue = new ProductRefinementQueue(
-            productAgentFactory, routingSpecStore, eventBus,
-            loggerFactory.CreateLogger<ProductRefinementQueue>());
+            initiativeApprovals, () => projectFactory.KnownProjects.Select(p => p.Id).ToList(),
+            IngestionForProject,
+            id => projectFactory.Find(id)?.Specs ?? throw new InvalidOperationException($"Unknown initiative project {id}"),
+            (project, spec, ct) => productAgentFactory.Create().RefineSpecAsync(spec, project, ct), eventBus,
+            loggerFactory.CreateLogger<ProductRefinementQueue>(),
+            repair: (project, spec, diagnostics, ct) => productAgentFactory.Create().RefineSpecAsync(spec, project, ct, diagnostics));
         services.AddSingleton(productRefinementQueue);
         var groomerFactory = new GroomerAgentFactory(
             issues, routingSpecStore, eventBus, chatClientFactory, llmConfig, loggerFactory,
             memory: memoryStore, projectRoot: primary.Root,
+            legacyVisionOwnerProjectId: visionSnapshot.Exists ? primary.Id : null,
             projectRootLookup: ProjectRootLookup,
-            issueStoreLookup: id => projectFactory.Find(id)?.Issues);
+            issueStoreLookup: id => projectFactory.Find(id)?.Issues,
+            roleTerritoriesLookup: async (id, ct) =>
+            {
+                var registered = await projectStore.GetAsync(id, ct)
+                    ?? throw new InvalidOperationException($"Unknown grooming project {id}.");
+                return registered.Territories;
+            },
+            roleCapacitiesLookup: async (id, ct) =>
+            {
+                var registered = await projectStore.GetAsync(id, ct)
+                    ?? throw new InvalidOperationException($"Unknown grooming project {id}.");
+                return registered.Roles;
+            },
+            refreshContext: async (id, refreshCt) =>
+            {
+                try
+                {
+                    var context = projectFactory.Find(id)
+                        ?? throw new InvalidOperationException($"Unknown grooming project {id}.");
+                    if (string.IsNullOrWhiteSpace(context.Options.Root))
+                        throw new InvalidOperationException($"Grooming project {id} has no configured checkout root.");
+                    var github = await GitHubTokenResolver.ResolveAsync(id, options.GitHub, secretStore, refreshCt);
+                    var refreshed = await cloner.SyncAsync(context.Options, github, refreshCt);
+                    if (!refreshed.Ok)
+                        throw new InvalidOperationException($"Grooming project {id} checkout could not be refreshed safely; no paid attempt was started.");
+                    await projectStore.UpdateSyncStatusAsync(id, DateTime.UtcNow, null, refreshCt);
+                }
+                catch (Exception ex) when (!refreshCt.IsCancellationRequested)
+                {
+                    await projectStore.UpdateSyncStatusAsync(id, DateTime.UtcNow,
+                        $"Planning refresh failed ({ex.GetType().Name}); verify the configured checkout is clean, on its configured branch, and reachable. No grooming model ran.", refreshCt);
+                    throw;
+                }
+            });
         services.AddSingleton(groomerFactory);
 
         var designHygiene = new DesignHygieneChecker(
@@ -600,13 +729,13 @@ public static class ForgeComposition
             new SocketsHttpHandler(),
             meshyOptions,
             loggerFactory.CreateLogger<Forge.Meshy.MeshyClient>(),
-            artOutputRoot: primary.Id == "default"
-                ? Path.Combine(primary.Root, ".portHorizon", "art-output")
-                : ForgesystemPaths.ArtOutputDir(orchDataRoot, primary.Id));
+            artOutputRoot: ForgesystemPaths.ArtistOutputRoot(orchDataRoot, primary.Id, primary.Root));
         services.AddSingleton(meshy);
         var artistAgentFactory = new ArtistAgentFactory(
             routingSpecStore, designArtifacts, artOutputs, artistRuns, memoryStore, meshy,
-            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
+            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory,
+            artOutputRoot: id => ForgesystemPaths.ArtistOutputRoot(orchDataRoot, id,
+                id == "default" ? ProjectRootLookup(id) : null));
         services.AddSingleton(artistAgentFactory);
 
         var primaryBundle = dispatchBundleFactory.Build(primary);
@@ -615,7 +744,7 @@ public static class ForgeComposition
             new GitHubRecoveryAdapter(primaryBundle.GitHub),
             eventBus,
             loggerFactory.CreateLogger<StartupRecovery>(),
-            lifecycle: lifecycle);
+            lifecycle: lifecycle, hasDurableWorker: hasDurableWorker);
         services.AddSingleton(startupRecovery);
 
         log.LogInformation(
@@ -644,6 +773,7 @@ public static class ForgeComposition
             sprintPropose: sprintPropose,
             issuesJsonlPath: issuesJsonlPath,
             vision: vision,
+            visionConversation: sp.GetRequiredService<IVisionConversation>(),
             groomerRuns: groomerRuns,
             designerFactory: designerAgentFactory,
             designerRuns: designerRuns,
@@ -676,7 +806,20 @@ public static class ForgeComposition
             gitHubForProject: GitHubForProject,
             providerApiKeys: providerKeyResolver,
             eventPublisher: sp.GetRequiredService<IEventPublisher>(),
-            transport: sp.GetRequiredService<ITransport>()));
+            transport: sp.GetRequiredService<ITransport>(),
+            hasActiveWorker: options.Worker.Enabled
+                ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
+                    .HasActiveAsync(options.Controller.DatasetId, projectId, taskId, ct)
+                : null,
+            budgetStore: options.Controller.Enabled ? new Core.Control.DurableBudgetStore(registryIssues.Db) : null,
+            budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null,
+            initiativeApprovals: initiativeApprovals,
+            mutationTokenFile: options.Controller.Enabled ? options.Controller.TokenFile : null,
+            releaseSource: sp.GetRequiredService<Forge.Deploy.IRoutineReleaseSource>(), wakeDelivery: wakeups.Deploy.Signal,
+            projectProvisioner: options.Controller.Enabled
+                ? new Control.KubernetesProjectProvisioner(() => sp.GetRequiredService<HttpClient>(), options) : null,
+            workerHistory: options.Worker.Enabled ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
+                .ListSummariesAsync(options.Controller.DatasetId, projectId, taskId, ct) : null));
 
         // Schedulers: trigger events kick via the wakeup signals; the
         // interval is now the 15-MINUTE BACKSTOP (the 5m cadence is
@@ -696,7 +839,7 @@ public static class ForgeComposition
         services.AddSingleton(new ScheduledWatchdog(
             projectFactory, eventBus,
             loggerFactory.CreateLogger<ScheduledWatchdog>(),
-            lifecycle));
+            lifecycle, hasDurableWorker));
         services.AddSingleton(new DesignerScheduler(
             routingSpecStore, designerAgentFactory, designerRuns, eventBus,
             loggerFactory.CreateLogger<DesignerScheduler>(),
@@ -716,10 +859,25 @@ public static class ForgeComposition
             gates: stageGates,
             followUpTriage: followUpTriage,
             wakeup: wakeups.Assemble,
-            eventPublisher: eventPublisher,
-            failureAgingWindow: options.Orchestrator.FailureAgingDays is > 0
-                ? TimeSpan.FromDays(options.Orchestrator.FailureAgingDays.Value)
-                : null));
+            eventPublisher: eventPublisher, initiativeProposals: initiativeProposals, planning: options.SprintPlanning,
+            deliveryEvidenceReconciler: options.Worker.Enabled
+                ? (id, task, ct) => projectFactory.Find(id) is { } project
+                    ? dispatchBundleFactory.VerifyCompletedHeadAsync(project, task, ct)
+                    : Task.FromResult(false)
+                : null,
+            completionPolicyResolver: async (projectId, ct) =>
+            {
+                var context = projectFactory.Find(projectId);
+                if (context is null) return null;
+                var project = await new Forge.Deploy.DeploymentStore(((IssueStore)context.Issues).Db).GetEffectiveProjectAsync(context.Options, ct);
+                var deployment = project.Deployment;
+                if (deployment is null || deployment.Environments.Count == 0) return null;
+                if (deployment.SprintEnvironment is not { } environment) return new Core.Completion.CompletionPolicySnapshot(null, false, null);
+                var target = DeploymentEnvironmentResolver.Capture(project, environment);
+                return new Core.Completion.CompletionPolicySnapshot(target.Name, deployment.Environments[target.Name].RequireApproval, System.Text.Json.JsonSerializer.Serialize(target));
+            },
+            routineDeploymentEnabled: projectId => projectFactory.Find(projectId)?.Options.Deployment
+                is { Kind: DeploymentKind.Kubernetes, RoutineEnabled: true }));
 
         return services.BuildServiceProvider();
     }

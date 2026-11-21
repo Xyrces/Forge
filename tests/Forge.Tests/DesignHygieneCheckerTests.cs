@@ -73,6 +73,38 @@ public class DesignHygieneCheckerTests : IDisposable
 
     private DesignHygieneChecker NewChecker() => new(_specs, _graphCache, _graphBuilder, _workDir);
 
+    [Fact]
+    public async Task LivePilotRejectsEpicAsSpecDependency_ButRecognizesPopulatedPathTouches()
+    {
+        var epic = await _issues.CreateAsync(new NewIssue("epic", "Running Forge revision"));
+        var spec = await CreateSpecAsync($"""
+            ## Acceptance criteria
+            - [ ] Read only /app/source-revision and preserve build-info compatibility.
+            ## Touches
+            - `Dashboard/`
+                - Add or adapt the shared artifact reader.
+            - `Forge.UI/Components/` shared dashboard shell/layout
+                - Render global revision independently of project selection.
+            ## Dependencies
+            - related {epic.Id} — Existing initiative for globally displaying the running Forge source revision.
+            """);
+        var report = await NewChecker().CheckAsync(spec);
+        Assert.Contains(report.Findings, f => f.Rule == "broken_dep_chain");
+        Assert.DoesNotContain(report.Findings, f => f.Rule == "no_touches");
+        Assert.Contains(report.Findings, f => f.Rule == "touches_not_module_mapped" && f.Severity == HygieneSeverity.Warning);
+        Assert.False(report.Passed);
+    }
+
+    [Fact]
+    public async Task DependencyCannotResolveToAnotherProjectsSpec()
+    {
+        var other = await _specs.CreateAsync(new NewSpec("other", "Other spec", ""));
+        var spec = await CreateSpecAsync($"## Acceptance criteria\n- [ ] Works\n## Dependencies\n- depends_on {other.Id}");
+        var report = await NewChecker().CheckAsync(spec);
+        Assert.Contains(report.Findings, f => f.Rule == "broken_dep_chain");
+        Assert.False(report.Passed);
+    }
+
     private async Task<SpecRecord> CreateSpecAsync(string body, SpecStatus status = SpecStatus.ReadyForDesign)
     {
         var spec = await _specs.CreateAsync(new NewSpec("P", "Test", body));
@@ -253,23 +285,18 @@ public class DesignHygieneCheckerTests : IDisposable
     {
         // Spec is in Shipped; Designer shouldn't process it.
         var spec = await CreateSpecAsync(HealthyBody, SpecStatus.Draft);
-        // Walk the chain: Draft -> ReadyForDesign -> Designed -> Grooming -> Groomed -> Shipped
-        // (some transitions require valid intermediates; we walk the chain)
-        try
+        // Seed a historical label explicitly: new writes cannot claim delivery without evidence.
+        await using (var connection = await _issues.Db.OpenAsync())
+        using (var command = connection.CreateCommand())
         {
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign);
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.Designed);
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming);
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed);
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.Shipped);
+            command.CommandText = "UPDATE spec SET status='Shipped' WHERE id=@id";
+            var parameter = command.CreateParameter(); parameter.ParameterName = "@id"; parameter.Value = spec.Id;
+            command.Parameters.Add(parameter);
+            await command.ExecuteNonQueryAsync();
         }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException($"Walk failed: {ex.GetType().Name}: {ex.Message}", ex);
-        }
+        var historical = await _specs.SetStatusAsync(spec.Id, SpecStatus.Shipped);
+        Assert.Equal(SpecStatus.Shipped, historical.Status);
 
-        // Re-fetch: the local `spec` is stale; the walk advanced its
-        // status. The hygiene checker should still see Shipped.
         var fresh = (await _specs.GetAsync(spec.Id))!;
         Assert.Equal(SpecStatus.Shipped, fresh.Status);
 

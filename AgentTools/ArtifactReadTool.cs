@@ -1,3 +1,4 @@
+using Forge.Meshy;
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
@@ -20,8 +21,9 @@ namespace Forge.AgentTools;
 ///   <item><c>spec-</c> — spec body (markdown). Returns the most
 ///   recent version of the spec.</item>
 ///   <item><c>art-</c> — art_output body (file path, e.g.
-///   <c>spec-1/calc.glb</c>). Returns the relative path; the
-///   consuming agent's <c>bash</c> tool reads the file.</item>
+///   <c>spec-1/calc.glb</c>). When runtime storage roots are supplied,
+///   returns a validated absolute path for the consuming agent's
+///   <c>bash</c> tool, independent of its task working directory.</item>
 /// </list>
 /// </para>
 ///
@@ -39,19 +41,30 @@ public sealed class ArtifactReadTool
     private readonly ArtOutputStore _artOutputs;
     private readonly ContextHandoffStore? _handoffs;
     private readonly ILogger<ArtifactReadTool>? _logger;
+    private readonly bool _requireOwnedSpec;
+    private readonly OwnedArtifactHistoryStore? _history;
+    private readonly string? _artOutputRoot;
 
     public ArtifactReadTool(
         DesignArtifactStore designArtifacts,
         ISpecStore specs,
         ArtOutputStore artOutputs,
         ContextHandoffStore? handoffs = null,
-        ILogger<ArtifactReadTool>? logger = null)
+        ILogger<ArtifactReadTool>? logger = null,
+        bool requireOwnedSpec = false,
+        OwnedArtifactHistoryStore? history = null,
+        string? artOutputRoot = null)
     {
+        if (requireOwnedSpec && specs is ProjectRoutingSpecStore)
+            throw new ArgumentException("Scoped artifact reads require the project's physical spec store.", nameof(specs));
         _designArtifacts = designArtifacts;
         _specs = specs;
         _artOutputs = artOutputs;
         _handoffs = handoffs;
         _logger = logger;
+        _requireOwnedSpec = requireOwnedSpec;
+        _history = history;
+        _artOutputRoot = artOutputRoot;
     }
 
     /// <summary>
@@ -75,7 +88,16 @@ public sealed class ArtifactReadTool
         if (artifactId.StartsWith("design-", StringComparison.Ordinal))
         {
             var row = await _designArtifacts.GetAsync(artifactId, cancellationToken);
-            if (row is not null)
+            if (row is null && _history is not null)
+            {
+                try { row = (await _history.GetDesignAsync(artifactId, cancellationToken))?.Artifact; }
+                catch (ArtifactHistoryAmbiguousException ex)
+                {
+                    _logger?.LogWarning(ex, "Artifact history is ambiguous for {Id}", artifactId);
+                    return JsonSerializer.Serialize(new { error = "ambiguous_history", id = artifactId });
+                }
+            }
+            if (row is not null && await OwnsSpecAsync(row.SpecId, cancellationToken))
             {
                 body = row.Body;
                 kind = "design";
@@ -93,13 +115,36 @@ public sealed class ArtifactReadTool
         else if (artifactId.StartsWith("art-", StringComparison.Ordinal))
         {
             var row = await _artOutputs.GetAsync(artifactId, cancellationToken);
-            if (row is not null)
+            var root = _artOutputRoot;
+            if (row is null && _history is not null)
             {
-                // The body of an art_output is a relative file
-                // path. Returning the path (not the file content)
-                // is the contract: the agent uses its `bash` tool
-                // to read the file.
-                body = row.Body;
+                try
+                {
+                    var found = await _history.GetArtAsync(artifactId, cancellationToken);
+                    row = found?.Artifact;
+                    root = found?.ArtOutputRoot;
+                }
+                catch (ArtifactHistoryAmbiguousException ex)
+                {
+                    _logger?.LogWarning(ex, "Artifact history is ambiguous for {Id}", artifactId);
+                    return JsonSerializer.Serialize(new { error = "ambiguous_history", id = artifactId });
+                }
+            }
+            if (row is not null && await OwnsSpecAsync(row.SpecId, cancellationToken))
+            {
+                try
+                {
+                    if (root is not null)
+                        body = ArtifactFilePath.Resolve(root, row.SpecId, row.Body);
+                    else if (_artOutputRoot is null && _history is null)
+                        body = row.Body;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+                {
+                    _logger?.LogWarning(ex, "Art output file is unavailable for {Id}", artifactId);
+                }
+                if (body is null)
+                    return JsonSerializer.Serialize(new { error = "art_file_unavailable", id = artifactId });
                 kind = "art";
             }
         }
@@ -132,6 +177,11 @@ public sealed class ArtifactReadTool
             body,
         });
     }
+
+    private async Task<bool> OwnsSpecAsync(string specId, CancellationToken ct)
+        // The supplied spec store is the run's physical project owner. Legacy
+        // project_id text can be stale; it must not replace that boundary.
+        => !_requireOwnedSpec || await _specs.GetAsync(specId, ct) is not null;
 
     /// <summary>
     /// MAF-friendly wrapper. Same signature but uses an

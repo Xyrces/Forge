@@ -202,8 +202,10 @@ public sealed class ProjectFlagLivenessTests : IDisposable
 /// </summary>
 public sealed class WatchSweepQaOrderingTests : IDisposable
 {
-    private const string CodeHead = "c0dehead";
-    private const string EvidenceHead = "ev1dence";
+    private readonly string CodeHead;
+    private readonly string EvidenceHead;
+    private readonly string ExternalHead;
+    private readonly string _origin;
 
     private readonly string _workDir;
     private readonly IssueStore _issues;
@@ -217,10 +219,30 @@ public sealed class WatchSweepQaOrderingTests : IDisposable
     {
         _workDir = TempRoot.Instance.NewDirectory("sweep-qa");
         Directory.CreateDirectory(_workDir);
+        _origin = _workDir + "-origin.git";
+        Git(_workDir, "init", "--bare", _origin);
+        Git(_workDir, "init", "-b", "main");
+        Git(_workDir, "config", "user.name", "Test");
+        Git(_workDir, "config", "user.email", "test@example.com");
+        File.WriteAllText(Path.Combine(_workDir, "F.cs"), "// code under QA\n");
+        Git(_workDir, "add", "F.cs");
+        Git(_workDir, "commit", "-m", "code");
+        CodeHead = Git(_workDir, "rev-parse", "HEAD");
+        File.WriteAllText(Path.Combine(_workDir, "qa-evidence.md"), "QA passed the code revision.\n");
+        Git(_workDir, "add", "qa-evidence.md");
+        Git(_workDir, "commit", "-m", "QA evidence");
+        EvidenceHead = Git(_workDir, "rev-parse", "HEAD");
+        File.WriteAllText(Path.Combine(_workDir, "external.txt"), "later external work\n");
+        Git(_workDir, "add", "external.txt");
+        Git(_workDir, "commit", "-m", "external push");
+        ExternalHead = Git(_workDir, "rev-parse", "HEAD");
+        Git(_workDir, "remote", "add", "origin", _origin);
+        Git(_workDir, "push", "origin", "main");
+        Git(_workDir, "reset", "--hard", CodeHead); // engineering checkout deliberately lags the PR
         var dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(dbPath, "test");
         _events = new InMemoryDashboardEventBus();
-        _gh = new FakeGitHub();
+        _gh = new FakeGitHub(CodeHead);
         _runner = new RecordingRunner();
         var worktrees = new GitWorktreeService(
             new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
@@ -258,12 +280,31 @@ public sealed class WatchSweepQaOrderingTests : IDisposable
     {
         try { _issues.Dispose(); } catch { }
         try { Directory.Delete(_workDir, recursive: true); } catch { }
+        try { Directory.Delete(_origin, recursive: true); } catch { }
+    }
+
+    private static string Git(string directory, params string[] args)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo("git")
+        { WorkingDirectory = directory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        foreach (var arg in args) start.ArgumentList.Add(arg);
+        using var process = System.Diagnostics.Process.Start(start)!;
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, error.GetAwaiter().GetResult());
+        return output.GetAwaiter().GetResult().Trim();
     }
 
     private sealed class FakeGitHub : GitHubService
     {
-        public string HeadSha = CodeHead;
-        public FakeGitHub() : base("o", "r", null) { }
+        public override bool RequireFormalReview => false;
+        public string HeadSha;
+        public FakeGitHub(string head) : base("o", "r", null) { HeadSha = head; }
+        public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<PullRequestReview>>(Array.Empty<PullRequestReview>());
+        public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
+            => Task.FromResult(CommitState.Success);
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
         {
             // Octokit's Head is init-only; tests set it via reflection
@@ -290,8 +331,19 @@ public sealed class WatchSweepQaOrderingTests : IDisposable
     private sealed class RecordingRunner : IAgentRunner
     {
         public readonly List<AgentType> Calls = new();
+        public readonly List<string> ReviewedHeads = new();
+        public bool SawQaEvidence;
         public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context = null, CancellationToken ct = default)
         {
+            if (role == AgentType.Reviewer)
+            {
+                var path = context!["worktreePath"].ToString()!;
+                lock (Calls)
+                {
+                    ReviewedHeads.Add(Git(path, "rev-parse", "HEAD"));
+                    SawQaEvidence = File.Exists(Path.Combine(path, "qa-evidence.md"));
+                }
+            }
             lock (Calls) Calls.Add(role);
             return Task.FromResult(new AgentRunResult("REVIEWER_VERDICT: APPROVE", null, 0, 0, TimeSpan.Zero));
         }
@@ -355,13 +407,13 @@ public sealed class WatchSweepQaOrderingTests : IDisposable
         var task = await SeedAsync(new Dictionary<string, object>
         {
             ["branchSha"] = CodeHead,
-            ["watchHeadSha"] = "externa1push",
+            ["watchHeadSha"] = ExternalHead,
             ["qaSha"] = EvidenceHead,
             ["qaForSha"] = CodeHead,
             ["qaVerdict"] = QaDispatcher.VerdictPass,
             ["reviewStartedAt"] = reviewStartedSeed,
         });
-        _gh.HeadSha = "externa1push";
+        _gh.HeadSha = ExternalHead;
 
         await _sweep.TryLaunchBackgroundReviewAsync(task, _bundle, CancellationToken.None);
 
@@ -399,6 +451,13 @@ public sealed class WatchSweepQaOrderingTests : IDisposable
             TimeSpan.FromSeconds(15));
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal(nameof(ReviewerVerdict.Approve), after.GetMetadata("reviewVerdict"));
+        Assert.Equal(EvidenceHead, after.GetMetadata("reviewSha"));
+        lock (_runner.Calls)
+        {
+            Assert.Equal(EvidenceHead, Assert.Single(_runner.ReviewedHeads));
+            Assert.True(_runner.SawQaEvidence);
+        }
+        Assert.Equal(CodeHead, Git(_workDir, "rev-parse", "HEAD"));
         // QA was current — no QA run launched.
         Assert.Null(after.GetMetadata("qaStartedAt"));
 
@@ -441,6 +500,7 @@ public sealed class WatchHeadShaRecordingTests : IDisposable
 
     private sealed class FakeGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public FakeGitHub() : base("o", "r", null) { }
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
         {

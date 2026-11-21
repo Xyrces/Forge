@@ -147,7 +147,8 @@ public sealed record SpecRecord(
     DateTime CreatedAt,
     DateTime UpdatedAt,
     string Body,
-    string? Author);
+    string? Author,
+    DateTime? CurrentVersionCreatedAt = null);
 
 public sealed record SpecVersionRecord(
     string SpecId,
@@ -177,12 +178,30 @@ public interface ISpecStore
     Task<SpecRecord> UpdateBodyAsync(string id, UpdateSpecBody update, CancellationToken ct = default);
     /// <summary>Move a spec to a new status. Does NOT create a new version.</summary>
     Task<SpecRecord> SetStatusAsync(string id, SpecStatus status, CancellationToken ct = default);
+    /// <summary>Commit the designer's handoff and run receipt in one transaction.</summary>
+    Task CommitDesignDecisionAsync(string id, SpecStatus status, long runId,
+        IReadOnlyList<string> artifactIds, string hygieneJson, TimeSpan duration, CancellationToken ct = default)
+        => throw new NotSupportedException("This spec store does not support durable designer handoffs.");
     Task<IReadOnlyList<SpecVersionRecord>> ListVersionsAsync(string id, CancellationToken ct = default);
     Task DeleteAsync(string id, CancellationToken ct = default);
 }
 
-public sealed class SpecStore : ISpecStore, IAsyncDisposable
+public sealed partial class SpecStore : ISpecStore, IAsyncDisposable
 {
+    internal Forge.Core.Db.IDbConnectionFactory Database => _issues.Db;
+    internal string ProjectId => _issues.ProjectId;
+
+    internal async Task<IReadOnlyList<string>> ListOwnedIdsAsync(CancellationToken ct)
+    {
+        await using var connection = await _issues.Db.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        // Physical ownership is authoritative even when a legacy row's project_id is stale.
+        command.CommandText = $"SELECT id FROM {T("spec")}";
+        var ids = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) ids.Add(reader.GetString(0));
+        return ids;
+    }
     private readonly IssueStore _issues;
     private readonly SpecBodyExtractor _extractor;
     private readonly DesignArtifactStore? _designArtifacts;
@@ -200,6 +219,15 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
 
     public async Task<SpecRecord> CreateAsync(NewSpec spec, CancellationToken ct = default)
     {
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var result = await CreateInTransactionAsync(conn, tx, spec, ct);
+        await tx.CommitAsync(ct);
+        return result;
+    }
+
+    internal async Task<SpecRecord> CreateInTransactionAsync(DbConnection conn, DbTransaction tx, NewSpec spec, CancellationToken ct)
+    {
         if (string.IsNullOrWhiteSpace(spec.ProjectId))
             throw new ArgumentException("projectId is required", nameof(spec));
         if (string.IsNullOrWhiteSpace(spec.Title))
@@ -208,8 +236,6 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         var now = DateTime.UtcNow;
         var id = $"spec-{Guid.NewGuid():N}";
 
-        await using var conn = await _issues.Db.OpenAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
 
         await using (var cmd = conn.CreateCommand())
         {
@@ -246,7 +272,6 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
 
         await PersistExtractionAsync(conn, tx, id, spec.Body, ct);
 
-        await tx.CommitAsync(ct);
         // Round 'now' to the same precision IssueStore.DateFormat
         // (millisecond) so the in-memory UpdatedAt matches the
         // value the DB stored. Without this, the next update
@@ -260,7 +285,7 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             Status: SpecStatus.Draft,
             ParentIssueId: spec.ParentIssueId, ParentSpecId: spec.ParentSpecId,
             CurrentVersion: 1, CreatedAt: storedNow, UpdatedAt: storedNow,
-            Body: spec.Body, Author: spec.Author);
+            Body: spec.Body, Author: spec.Author, CurrentVersionCreatedAt: storedNow);
     }
 
     public async Task<SpecRecord?> GetAsync(string id, CancellationToken ct = default)
@@ -273,7 +298,7 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             cmd.CommandText = $"""
                 SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
                 s.current_version, s.created_at, s.updated_at,
-                v.body, v.author
+                v.body, v.author, v.created_at
                 FROM {T("spec")} s
                 JOIN {T("spec_version")} v ON v.spec_id = s.id AND v.version = s.current_version
                 WHERE s.id = @id
@@ -292,7 +317,8 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
                 CreatedAt: IssueStore.ParseTime(rd.GetString(7)),
                 UpdatedAt: IssueStore.ParseTime(rd.GetString(8)),
                 Body: rd.GetString(9),
-                Author: rd.IsDBNull(10) ? null : rd.GetString(10));
+                Author: rd.IsDBNull(10) ? null : rd.GetString(10),
+                CurrentVersionCreatedAt: IssueStore.ParseTime(rd.GetString(11)));
         }
         return spec;
     }
@@ -307,7 +333,7 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         var sql = $"""
             SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
             s.current_version, s.created_at, s.updated_at,
-            v.body, v.author
+            v.body, v.author, v.created_at
             FROM {T("spec")} s
             JOIN {T("spec_version")} v ON v.spec_id = s.id AND v.version = s.current_version
             WHERE 1=1
@@ -333,7 +359,8 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
                 CreatedAt: IssueStore.ParseTime(rd.GetString(7)),
                 UpdatedAt: IssueStore.ParseTime(rd.GetString(8)),
                 Body: rd.GetString(9),
-                Author: rd.IsDBNull(10) ? null : rd.GetString(10)));
+                Author: rd.IsDBNull(10) ? null : rd.GetString(10),
+                CurrentVersionCreatedAt: IssueStore.ParseTime(rd.GetString(11))));
         }
         return list;
     }
@@ -430,15 +457,28 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         var now = DateTime.UtcNow;
         var current = await GetAsync(id, ct)
             ?? throw new InvalidOperationException($"Spec {id} not found");
+        if (status == SpecStatus.Shipped)
+        {
+            if (current.Status == SpecStatus.Shipped) return current; // Historical read/idempotence compatibility only.
+            throw new InvalidOperationException("Delivery must be established by sprint completion and deployment evidence; specifications cannot be manually marked Shipped.");
+        }
         SpecStatusTransitions.EnsureAllowed(current.Status, status);
         await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""UPDATE {T("spec")} SET status = @status, updated_at = @now WHERE id = @id""";
+        // Refinement completion advances its own spec and receipt atomically.
+        // Other callers cannot skip that boundary, including direct API status writes.
+        cmd.CommandText = $"""UPDATE {T("spec")} SET status = @status, updated_at = @now WHERE id = @id AND NOT EXISTS (SELECT 1 FROM {T("initiative_ingestion")} r WHERE r.spec_id=@id AND r.refinement_state <> 'Completed')""";
         cmd.AddParam("@status", status.ToString());
         cmd.AddParam("@now", IssueStore.DateFormatTime(now));
         cmd.AddParam("@id", id);
         var rows = await cmd.ExecuteNonQueryAsync(ct);
-        if (rows == 0) throw new InvalidOperationException($"Spec {id} not found");
+        if (rows == 0)
+        {
+            var receipt = await new Initiatives.InitiativeIngestionStore(_issues).GetBySpecAsync(id, ct);
+            if (receipt is not null && receipt.RefinementState != "Completed")
+                throw new InitiativeRefinementPendingException(receipt.RefinementState);
+            throw new InvalidOperationException($"Spec {id} changed or was not found; reload before retrying.");
+        }
         // Publish AFTER the mutation commits; the publisher swallows
         // failures (a hint never breaks a DB mutation).
         if (current.Status != status)
@@ -455,6 +495,20 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             }, ct);
         }
         return (await GetAsync(id, ct))!;
+    }
+
+    public Task<Initiatives.InitiativeIngestion?> GetInitiativeRefinementAsync(string id, CancellationToken ct = default)
+        => new Initiatives.InitiativeIngestionStore(_issues).GetBySpecAsync(id, ct);
+
+    public async Task<IReadOnlySet<string>> ListRefinementBlockedSpecIdsAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT spec_id FROM {T("initiative_ingestion")} WHERE refinement_state <> 'Completed'";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        while (await reader.ReadAsync(ct)) ids.Add(reader.GetString(0));
+        return ids;
     }
 
     public async Task<IReadOnlyList<SpecVersionRecord>> ListVersionsAsync(string id, CancellationToken ct = default)

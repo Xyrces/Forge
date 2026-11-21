@@ -106,8 +106,6 @@ public class AddProjectEffect : Effect<ProjectsActions.AddProjectAction>
             }
             // Refresh the list regardless of clone outcome.
             dispatcher.Dispatch(new ProjectsActions.LoadProjectsAction());
-            // Refresh the list regardless of clone outcome.
-            dispatcher.Dispatch(new ProjectsActions.LoadProjectsAction());
         }
         catch (Exception ex)
         {

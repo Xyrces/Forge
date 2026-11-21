@@ -6,23 +6,52 @@ executed end-to-end on 2026-07-27: schema creation, migration, `--check`,
 and a full-service run (registry, per-project stores, secrets, memory,
 skill seeding, recovery pass, dashboard endpoints) all passed.
 
-## Resources (already provisioned)
+## Resource configuration
+
+Replace the placeholders below with your private deployment values. Keep the resulting configuration outside the repository.
 
 | Resource | Value |
 |---|---|
-| Server | `forge-sql-server.database.windows.net` (RG `forge`, centralus) |
-| Production DB | `forge` — Basic tier (5 DTU, 2GB, ~$5/mo flat, always online) |
-| Dev/rehearsal DB | `free-sql-db-5815147` — free-offer serverless (0.5–2 vCore, auto-pause 60 min, 100k vCore-s/month grant). **Not viable as a 24/7 primary** — a chatty always-on orchestrator burns the grant in ~3 days and `AutoPause` then freezes the DB for the rest of the month. |
-| Auth | Entra-only (`AzureAdOnlyAuthentication=true`; SQL logins rejected). Entra admin: `jtn5016@gmail.com` |
-| Managed identity | `forge-mi` (user-assigned, RG `forge`). Contained user + `db_owner` created in both DBs — reserved for the future ACA/AKS cutover; this machine authenticates as the Entra admin via Azure CLI credential |
-| Firewall | `forge-dev-machine` rule auto-refreshed by `scripts/refresh-sql-firewall.sh` (systemd ExecStartPre + `forge-sql-firewall.timer` every 15 min, also refreshes the az token) |
+| Server | `<sql-server>.database.windows.net` (RG `<resource-group>`, region `<azure-region>`) |
+| Production DB | `<production-database>` — Basic tier (5 DTU, 2GB, ~$5/mo flat, always online) |
+| Dev/rehearsal DB | `<rehearsal-database>` — free-offer serverless (0.5–2 vCore, auto-pause 60 min, 100k vCore-s/month grant). **Not viable as a 24/7 primary** — a chatty always-on orchestrator burns the grant in ~3 days and `AutoPause` then freezes the DB for the rest of the month. |
+| Auth | Entra-only (`AzureAdOnlyAuthentication=true`; SQL logins rejected). Entra admin: `admin@example.com` |
+| Managed identity | `<managed-identity>` (user-assigned, RG `<resource-group>`). Contained user + `db_owner` created in both DBs — reserved for the future ACA/AKS cutover; this machine authenticates as the Entra admin via Azure CLI credential |
+| Firewall | `<firewall-rule>` rule auto-refreshed by `scripts/refresh-sql-firewall.sh` (systemd ExecStartPre + `forge-sql-firewall.timer` every 15 min, also refreshes the az token) |
+
+## Firewall refresh configuration
+
+This section applies to the legacy systemd deployment. The K3s red/green
+installer does not need this timer or environment file.
+
+Create a private environment file at `/etc/forge/sql-firewall.env`,
+readable only by the service account and administrators. Supply the SQL server's
+short name, its resource group, and the rule that this host owns:
+
+```ini
+FORGE_SQL_SERVER=<sql-server>
+FORGE_SQL_RESOURCE_GROUP=<resource-group>
+FORGE_SQL_FIREWALL_RULE=<firewall-rule>
+```
+
+The dedicated firewall-refresh unit loads this optional `EnvironmentFile`.
+To enable refresh before the main Forge service starts, uncomment both
+`EnvironmentFile` and `ExecStartPre` in `deploy/systemd/forge.service`.
+For a legacy user unit, the unit's account must also be able to read the file.
+When refresh is enabled, all three values are
+required by `scripts/refresh-sql-firewall.sh`. Keep this file outside Git.
+The Linux deployment guide describes the timer and optional `ExecStartPre`
+integration.
+
+For a standalone invocation, export these three variables in the shell before
+running the script. Use your real values in private configuration.
 
 ## Config shape
 
 ```json
 "db": {
   "provider": "sqlserver",
-  "connectionString": "Server=tcp:forge-sql-server.database.windows.net,1433;Initial Catalog=forge;Authentication=Active Directory Default;Encrypt=True;Connect Timeout=30"
+  "connectionString": "Server=tcp:<sql-server>.database.windows.net,1433;Initial Catalog=<production-database>;Authentication=Active Directory Default;Encrypt=True;Connect Timeout=30"
 }
 ```
 
@@ -67,14 +96,14 @@ graph cache, DataProtection keyring (`~/.aspnet/DataProtection-Keys/`).
      --config ~/.config/forge/appsettings.json \
      --migrate-db --target sqlserver \
      [--include-open-work] \
-     --connection-string "Server=tcp:forge-sql-server.database.windows.net,1433;Initial Catalog=forge;Authentication=Active Directory Default;Encrypt=True;Connect Timeout=30"
+     --connection-string "Server=tcp:<sql-server>.database.windows.net,1433;Initial Catalog=<production-database>;Authentication=Active Directory Default;Encrypt=True;Connect Timeout=30"
    ```
    Idempotent — safe to re-run. `--reset` drops every `proj_*` schema
    and the `core` registry schema first (rehearsal only, never against
    the production DB after cutover).
 4. Flip `db.provider`/`db.connectionString` in
    `~/.config/forge/appsettings.json` (shape above; production DB name
-   `forge`, not the dev one).
+   `<production-database>`, not the dev one).
 5. `systemctl --user start forge` → `--check` → verify the dashboard
    renders and one canary task flows intake → groom → sprint → dispatch.
 6. **48h soak.** SQLite files stay untouched — rollback = flip
@@ -92,7 +121,9 @@ graph cache, DataProtection keyring (`~/.aspnet/DataProtection-Keys/`).
 
 ## ACA/AKS cutover (future)
 
-Config-only by design: attach `forge-mi` to the compute, set the same
+Provision the managed identity's database user as the Entra administrator with
+`--init-azure-sql --mi-name <managed-identity>`. The identity name is required.
+Attach that identity to the compute, set the same
 connection string (Active Directory Default picks up the managed
 identity automatically), drop the firewall-refresh timer (use
 AllowAllWindowsAzureIps or a private endpoint). Prerequisites not yet

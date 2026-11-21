@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
@@ -44,6 +44,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<DesignArtifactStore?>? _designArtifactsFactory;
     private readonly Func<ISpecStore?>? _specsFactory;
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
+    private readonly Func<string, string?>? _artOutputRoot;
     private readonly ISecretStore? _secrets;
     private readonly IIssueStore? _issues;
     private readonly AgentRunStore? _runs;
@@ -51,6 +52,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<string?, IIssueStore?>? _issueStoreLookup;
     private readonly RoleModelOverrides? _modelOverrides;
     private readonly Configuration.GateOptions _gateOptions;
+    private readonly string? _legacyVisionOwnerProjectId;
 
     /// <summary>
     /// Optional path for the per-run diagnostic side-channel log
@@ -112,7 +114,9 @@ public sealed class MafAgentRunner : IAgentRunner
         // Resolves by context projectId; null/unknown → _issues.
         Func<string?, IIssueStore?>? issueStoreLookup = null,
         RoleModelOverrides? modelOverrides = null,
-        Configuration.GateOptions? gates = null)
+        Configuration.GateOptions? gates = null,
+        Func<string, string?>? artOutputRoot = null,
+        string? legacyVisionOwnerProjectId = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -124,10 +128,12 @@ public sealed class MafAgentRunner : IAgentRunner
         _projectTerritoryLookup = projectTerritoryLookup;
         _verifyCommandsLookup = verifyCommandsLookup;
         _memory = memory;
+        _legacyVisionOwnerProjectId = legacyVisionOwnerProjectId;
         _handoffs = handoffs;
         _designArtifactsFactory = designArtifacts;
         _specsFactory = specs;
         _artOutputsFactory = artOutputs;
+        _artOutputRoot = artOutputRoot;
         _secrets = secrets;
         _issues = issues;
         _runs = runs;
@@ -149,6 +155,7 @@ public async Task<AgentRunResult> RunAsync(
         CancellationToken ct)
     {
         var roleDef = _roles.ForType(role);
+        var isWorker = !string.IsNullOrWhiteSpace(ResolveContextString(context, "workerAttemptId"));
         var projectId = ResolveContextString(context, "projectId");
         if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
         // The run registry row belongs to the OWNING project's schema:
@@ -167,6 +174,9 @@ public async Task<AgentRunResult> RunAsync(
             skillInstructions,
             BuildSprintBlock(context),
             memoryInstructions,
+            isWorker ? WorkerPublicationPolicy.Instructions : string.Empty,
+            isWorker && role == AgentType.Reviewer && ResolveContextString(context, "existingImplementationReview") == "true"
+                ? ExistingImplementationReviewPolicy.Instructions : string.Empty,
         }.Where(s => !string.IsNullOrEmpty(s)));
         // P1 fix: instructions go to the agent's instructions: parameter,
         // NOT into the user message. The user prompt is the operator's
@@ -231,7 +241,8 @@ public async Task<AgentRunResult> RunAsync(
             }
 
             tools.Add(new BashTool(bashWorkingDir, logger: null, envVars: secretEnv,
-                mutationsAllowed: mutationsAllowed, mutationRefusalMessage: mutationRefusalMessage).AsAIFunction());
+                mutationsAllowed: mutationsAllowed, mutationRefusalMessage: mutationRefusalMessage,
+                publicationForbidden: isWorker).AsAIFunction());
         }
 
         // Reviewer drill-in: the dispatcher hands the FULL diff via
@@ -256,9 +267,28 @@ public async Task<AgentRunResult> RunAsync(
         var artOutputs = _artOutputsFactory?.Invoke();
         if (designArtifacts is not null && specs is not null && artOutputs is not null)
         {
-            var readTool = new ArtifactReadTool(
-                designArtifacts, specs, artOutputs, _handoffs, logger: null);
-            tools.Add(readTool.AsAIFunction());
+            // Bind engineering reads and audit to the run's physical owner.
+            // Historical records are copied into that same store during upgrade.
+            if (projectId is not null && specs is ProjectRoutingSpecStore)
+            {
+                if (_issueStoreLookup?.Invoke(projectId) is IssueStore owner)
+                    tools.Add(new ArtifactReadTool(
+                        new DesignArtifactStore(owner.Db), new SpecStore(owner), new ArtOutputStore(owner.Db),
+                        new ContextHandoffStore(owner.Db), requireOwnedSpec: true,
+                        history: new OwnedArtifactHistoryStore(owner.Db),
+                        artOutputRoot: _artOutputRoot?.Invoke(projectId)).AsAIFunction());
+            }
+            else if (specs is SpecStore && (!isWorker || projectId is not null)
+                && (_issues is not IssueStore local || projectId is null || local.ProjectId == projectId))
+            {
+                // Workers and legacy single-project constructors already supply a
+                // concrete owner-local spec store. No routing lookup is needed;
+                // artifact IDs must still resolve to a spec in that physical store.
+                tools.Add(new ArtifactReadTool(designArtifacts, specs, artOutputs, _handoffs, requireOwnedSpec: true,
+                    history: _artOutputRoot is not null && _issues is IssueStore localOwner
+                        ? new OwnedArtifactHistoryStore(localOwner.Db) : null,
+                    artOutputRoot: projectId is null ? null : _artOutputRoot?.Invoke(projectId)).AsAIFunction());
+            }
         }
 
         // Follow-up filing: engineering + review roles can file
@@ -351,12 +381,13 @@ public async Task<AgentRunResult> RunAsync(
             tools: tools);
 
         var message = new ChatMessage(ChatRole.User, fullPrompt);
-        // Pause/resume: an explicit sessionId wins; otherwise the
-        // runner resumes the persisted session for this
-        // (project, task, role) when one exists — rework rounds AND
-        // plain retries come back warm instead of cold. Junk in the
-        // store degrades to a fresh session (logged).
-        var sessionKey = SessionKey(projectId, runTaskId, role);
+        // Engineering and QA reuse the task conversation across revisions.
+        // Reviewers resume only work on the revision they are assessing.
+        var sessionKey = SessionKey(projectId, runTaskId, role, ResolveContextString(context, "sourceSha"));
+        // Review history is evidence for one exact revision, never reusable task-wide context.
+        // Raw/legacy explicit sessions have no authenticated source binding. Resume only the
+        // current revision's own stored session; leave older transcripts untouched for audit.
+        if (role == AgentType.Reviewer) sessionId = null;
         var resumedSession = false;
         var session = await DeserializeSessionAsync(agent, sessionId, ct);
         if (session is null && sessionId is null && sessionKey is not null)
@@ -478,7 +509,10 @@ public async Task<AgentRunResult> RunAsync(
             // as the backstop for whatever survives.
             var worktreePath = ResolveWorktreePath(context);
             var verifyCommands = ResolveVerifyCommands(projectId, worktreePath);
+            // Distributed workers run the same full gate once, independently in WorkerHost.
+            // Legacy in-process runs retain their in-session correction loop.
             if (gateState?.PlanApproved == true
+                && string.IsNullOrEmpty(ResolveContextString(context, "workerAttemptId"))
                 && worktreePath is not null
                 && verifyCommands is { Count: > 0 })
             {
@@ -509,8 +543,11 @@ public async Task<AgentRunResult> RunAsync(
                         "Fix the failures below and iterate — verification runs again when you finish. " +
                         "Do not weaken tests to make them pass; fix the cause.\n\n" +
                         string.Join("\n\n", verify.Failures));
-                    response = await agent.RunAsync(feedback, session, cancellationToken: ct);
                     transcriptMessages.Add(feedback);
+                    // Preserve the verification diagnosis even if admission or
+                    // the provider fails before the corrective response arrives.
+                    await HeartbeatAsync(runStore, runId, transcriptMessages);
+                    response = await agent.RunAsync(feedback, session, cancellationToken: ct);
                     transcriptMessages.AddRange(response.Messages);
                     await HeartbeatAsync(runStore, runId, transcriptMessages);
                 }
@@ -1069,6 +1106,9 @@ public async Task<AgentRunResult> RunAsync(
         var env = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var meta in stored)
         {
+            // Runtime credentials are never tool environment variables.
+            if (_config.Providers.Any(p => string.Equals(meta.Kind, SecretKinds.ForProvider(p.Name), StringComparison.OrdinalIgnoreCase))
+                || meta.Kind.Contains("connection_string", StringComparison.OrdinalIgnoreCase)) continue;
             string? plaintext;
             try
             {
@@ -1170,6 +1210,12 @@ public async Task<AgentRunResult> RunAsync(
         return sb.ToString().TrimEnd();
     }
 
+    // Internal audit receipts remain stored and retrievable, but are not project guidance.
+    // These literal prefixes contain no SQL LIKE metacharacters; apply exclusions in SQL
+    // to avoid loading archived issue snapshots into every model request.
+    private static readonly string[] GeneralMemoryExcludedPrefixes =
+        ["sprint/", "session/", "operator-acceptance-repair/", "breaker/", "review/origins/", "vision/"];
+
     private async Task<string> BuildMemoryInstructionsAsync(
         IReadOnlyDictionary<string, object>? context, CancellationToken ct)
     {
@@ -1200,7 +1246,7 @@ public async Task<AgentRunResult> RunAsync(
             // are filtered out below anyway — reading them per run
             // strangled the Basic-tier DB under concurrency.
             memories = await _memory!.RecallAsync(keyPrefix: null,
-                excludePrefixes: new[] { "sprint/", "session/" }, ct);
+                excludePrefixes: GeneralMemoryExcludedPrefixes, ct);
         }
         catch (Exception ex)
         {
@@ -1214,9 +1260,18 @@ public async Task<AgentRunResult> RunAsync(
         // pause/resume), not prompt material. Keep the global block
         // free of both.
         var globalOnly = memories
-            .Where(m => !m.Key.StartsWith("sprint/", StringComparison.Ordinal)
-                && !m.Key.StartsWith("session/", StringComparison.Ordinal))
+            .Where(m => !GeneralMemoryExcludedPrefixes.Any(prefix => m.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
             .ToList();
+        try
+        {
+            var projectId = ResolveContextString(context, "projectId");
+            var vision = await VisionMemory.ReadAsync(_memory!, projectId, _legacyVisionOwnerProjectId, ct);
+            if (vision is not null) globalOnly.Insert(0, vision);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to recall the owning project's vision; continuing without it");
+        }
         var globalRendered = MemoryStore.RenderForPrompt(globalOnly);
         if (!string.IsNullOrEmpty(globalRendered)) sections.Add(globalRendered);
         return string.Join("\n\n", sections);
@@ -1327,10 +1382,14 @@ public async Task<AgentRunResult> RunAsync(
     /// Null when there's no task id — untasked runs (groomer,
     /// designer, intake) don't persist sessions.
     /// </summary>
-    internal static string? SessionKey(string? projectId, string? taskId, AgentType role)
-        => string.IsNullOrWhiteSpace(taskId)
-            ? null
-            : $"session/{(string.IsNullOrWhiteSpace(projectId) ? "_" : projectId)}/{taskId}/{role}";
+    internal static string? SessionKey(string? projectId, string? taskId, AgentType role, string? sourceSha = null)
+    {
+        if (string.IsNullOrWhiteSpace(taskId)) return null;
+        var key = $"session/{(string.IsNullOrWhiteSpace(projectId) ? "_" : projectId)}/{taskId}/{role}";
+        if (role != AgentType.Reviewer) return key;
+        return sourceSha is not null && System.Text.RegularExpressions.Regex.IsMatch(sourceSha, "\\A[0-9a-f]{40}\\z")
+            ? key + "/" + sourceSha : null;
+    }
 
     /// <summary>
     /// Serialize the run's MAF session and persist it under the

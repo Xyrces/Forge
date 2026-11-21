@@ -76,7 +76,7 @@ public static class TaskStateProjector
         switch (task.Status)
         {
             case IssueStatus.Completed:
-                return new(prNumber is not null ? TaskLifecycleState.Merged : TaskLifecycleState.Completed,
+                return new(TaskSituation.HasObservedMerge(task) ? TaskLifecycleState.Merged : TaskLifecycleState.Completed,
                     null, "done", strikes, max);
             case IssueStatus.Failed:
                 return new(TaskLifecycleState.Failed, null, "operator (failed — inspect, then requeue or close)", strikes, max);
