@@ -24,6 +24,20 @@ For your first checkout, start with [Build and test the code](docs/getting-start
 
 If a new class needs to read `IOptions<AgentOptions>` AND write to `IssueStore` AND make HTTP calls, that's a code smell — split the responsibilities across Core / Agents / Orchestrator.
 
+## Privacy check for pull requests
+
+The **Repository privacy** check reads the PR title and description, then scans new filenames, added text, and commit messages in every commit a PR would bring into `main`. This includes a value added in one commit and removed in the next. Author and committer details are also checked for known private identifiers. Use `$HOME` for a home directory, `example-user` for an account, and `<resource-group>` for an Azure resource. Supply real deployment values through private configuration.
+
+A finding lists the commit, file, line and category where possible. The log withholds sensitive filenames and matched text. Resolve the finding on the PR branch. If an earlier PR commit contains a real value, remove it from the branch's proposed history as well. A proposed PR is already visible on GitHub, so run the check locally before pushing when working with installation data:
+
+```sh
+python3 scripts/check_pr_privacy.py origin/main HEAD
+```
+
+Local runs use the built-in patterns. The hosted check also reads `FORGE_PRIVATE_TERMS`, a repository Actions secret containing a JSON array of specific account, host and resource identifiers. Administrators can update it from a private file with `gh secret set FORGE_PRIVATE_TERMS < identifiers.json`. The hosted check fails if the list is missing or invalid. To recheck an existing PR after a policy change, run the **PR privacy** workflow on `main` with its PR number.
+
+The scanner reads Git objects using the policy on `main`. It checks binary filenames, skips binary payloads, and reports an error for files over 16 MiB. Use Git LFS for large assets. GitHub secret scanning and push protection cover supported credential formats separately.
+
 ## Conventions
 
 ### Code style
