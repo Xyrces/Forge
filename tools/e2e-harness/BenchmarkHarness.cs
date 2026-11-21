@@ -280,9 +280,11 @@ internal static class BenchmarkHarness
         // harness. The acceptance scope contains only the public task prompt.
         var title = externalCase?.Title ?? fixture!.Title;
         var prompt = externalCase?.Prompt ?? fixture!.Prompt;
+        var proposalTitle = title.Trim();
+        proposalTitle = proposalTitle[..Math.Min(proposalTitle.Length, 200)];
         var proposals = new InitiativeProposalStore(issues);
         var proposal = await proposals.CreateAsync(
-            new("benchmark", caseId, "forge", title, prompt, 2), cancellationToken);
+            new("benchmark", "benchmark-task", "forge", proposalTitle, prompt, 2), cancellationToken);
         await proposals.ExpandInIntakeAsync("benchmark", proposal.Id, cancellationToken);
         proposal = await proposals.ApproveAsync("benchmark", proposal.Id, proposal.Revision,
             proposal.Hash, "offline benchmark operator", cancellationToken);
@@ -293,12 +295,13 @@ internal static class BenchmarkHarness
         await ingestion.CompleteRefinementAsync(proposal.Id, proposal.Revision, cancellationToken);
         // External repository requests can exceed the scope excerpt limit. The
         // proposal hash and task retain the full prompt.
+        var excerpt = prompt.TrimStart();
         var scope = new SprintScopeReference(approved.SpecId, proposal.Id, proposal.Revision,
-            proposal.Hash, prompt[..Math.Min(prompt.Length, 4000)]);
+            proposal.Hash, excerpt[..Math.Min(excerpt.Length, 4000)]);
         var task = await issues.CreateAsync(new NewIssue(
             "task", title, prompt, Priority: 2,
             Metadata: new Dictionary<string, object> { ["groomed"] = true }), cancellationToken);
-        await new SprintOutcomeAuthority(issues).BindAsync(task.Id, new(1, "benchmark-task", title,
+        await new SprintOutcomeAuthority(issues).BindAsync(task.Id, new(1, "benchmark-task", proposalTitle,
             [new("task-acceptance", "Fulfil the approved benchmark request within its permitted files and pass the independent acceptance checks.",
                 SprintEvidenceKind.MergedAndVerified, scope)],
             [task.Id], ["task-acceptance"], SprintMemberReason.Delivers, scope), cancellationToken);
@@ -626,6 +629,9 @@ internal static class BenchmarkHarness
             var headRef = Path.Combine(
                 bare, "refs", "heads", prInfo.HeadBranch.Replace('/', Path.DirectorySeparatorChar));
             var headSha = File.ReadAllText(headRef).Trim();
+            // Rework pushes advance the existing branch. Deliver the actual bare
+            // remote head to the simulated GitHub service before review and merge.
+            gitHub.RegisterPushedBranch(prInfo.HeadBranch, headSha);
             var worktree = worktrees.WorktreePathFor(taskId);
             var attemptChecks = new List<BenchmarkCheck>();
             if (externalCase is null)

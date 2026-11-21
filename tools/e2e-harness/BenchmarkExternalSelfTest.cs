@@ -34,8 +34,8 @@ internal static class BenchmarkExternalSelfTest
             await File.WriteAllTextAsync(casePath, JsonSerializer.Serialize(new
             {
                 id = "synthetic-external-case",
-                title = "Produce a synthetic multi-file patch",
-                prompt = "Update both C# source files.\n\nRequirements:\n\t- keep both types buildable\n\t- avoid unrelated changes\nThis wiring fixture makes no official correctness claim.",
+                title = "Produce a synthetic multi-file patch " + new string('x', 220),
+                prompt = "Update both C# source files.\n\nRequirements:\n\t- keep both types buildable\n\t- avoid unrelated changes\nThis wiring fixture makes no official correctness claim.\n" + new string('x', 4100),
                 repositoryPath = source,
                 baseCommit,
                 allowedPaths = new[] { "src/A.cs", "src/B.cs" },
