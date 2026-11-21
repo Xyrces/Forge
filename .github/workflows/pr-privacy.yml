@@ -1,0 +1,100 @@
+name: PR privacy
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Open pull request number to recheck against main
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: pr-privacy-${{ inputs.pull_request || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: Scan proposed Git objects
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+    env:
+      PR_NUMBER: ${{ inputs.pull_request || github.event.pull_request.number }}
+      PR_FIELDS: '{head: .head.sha, base: .base.ref, state, title, body}'
+    steps:
+      - name: Start the check on the proposed commit
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq "$PR_FIELDS" > "$RUNNER_TEMP/pr-privacy.json"
+          head=$(jq -r 'select(.state == "open" and .base == "main") | .head' "$RUNNER_TEMP/pr-privacy.json")
+          if [[ -z "$head" || (-n "$EVENT_HEAD" && "$EVENT_HEAD" != "$head") ]]; then
+            echo "The PR was closed, retargeted, or updated before this run."
+            exit 0
+          fi
+          [[ "$head" =~ ^[a-f0-9]{40}$ ]]
+          id=$(gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" \
+            -f name='Repository privacy' -f head_sha="$head" -f status=in_progress \
+            -f details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+
+      # Only main is checked out. Never load an action, script or test from the PR.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.check.outputs.id != ''
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the proposed commit as data
+        if: steps.check.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_HEAD: ${{ steps.check.outputs.head }}
+        run: |
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            fetch --quiet --no-tags origin "refs/pull/$PR_NUMBER/head"
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD"
+
+      - name: Check new commits
+        if: steps.check.outputs.id != ''
+        env:
+          EXPECTED_HEAD: ${{ steps.check.outputs.head }}
+          FORGE_PRIVATE_TERMS: ${{ secrets.FORGE_PRIVATE_TERMS }}
+        run: |
+          python3 scripts/check_pr_privacy.py --require-private-terms \
+            --pr-metadata "$RUNNER_TEMP/pr-privacy.json" "$GITHUB_SHA" "$EXPECTED_HEAD"
+
+      - name: Publish the result
+        if: always() && steps.check.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_ID: ${{ steps.check.outputs.id }}
+          RESULT: ${{ job.status }}
+        run: |
+          conclusion=failure
+          if [[ "$RESULT" = success ]]; then
+            if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq "$PR_FIELDS" > "$RUNNER_TEMP/pr-current.json" \
+                && cmp -s "$RUNNER_TEMP/pr-privacy.json" "$RUNNER_TEMP/pr-current.json"; then
+              conclusion=success
+            else
+              echo "PR details changed or could not be verified. Recheck the current revision."
+            fi
+          fi
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
+            -f status=completed -f conclusion="$conclusion" --silent
+          test "$conclusion" = success
