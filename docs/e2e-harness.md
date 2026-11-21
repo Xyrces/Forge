@@ -6,6 +6,11 @@ The default fake-agent mode uses a local GitHub service and makes
 no model calls. For build prerequisites, start with
 [Getting started](getting-started.md#build-and-test-the-code).
 
+For reproducible task trials, independent grading, machine-readable results,
+and opt-in model usage limits, use the [benchmark runner](benchmark.md). The
+historical smoke mode below remains available; its token summary is not a
+complete model cost benchmark.
+
 ## What it verifies
 
 The default fake-runner mode performs these steps.

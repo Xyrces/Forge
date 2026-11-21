@@ -1,0 +1,40 @@
+{
+  "policies": [
+    {
+      "id": "cheap-engineer-frontier-review",
+      "models": [
+        {
+          "id": "cheap-engineer",
+          "provider": "provider-placeholder",
+          "model": "cheap-model-placeholder",
+          "baseUrl": "https://api.example.invalid/v1",
+          "apiKeyEnv": "BENCHMARK_CHEAP_PROVIDER_API_KEY",
+          "maxCalls": 12,
+          "maxInputTokens": 65536,
+          "maxOutputTokens": 4096,
+          "inputUsdPerMillion": "0.00",
+          "outputUsdPerMillion": "0.00"
+        },
+        {
+          "id": "frontier-review",
+          "provider": "provider-placeholder",
+          "model": "frontier-model-placeholder",
+          "baseUrl": "https://api.example.invalid/v1",
+          "apiKeyEnv": "BENCHMARK_FRONTIER_PROVIDER_API_KEY",
+          "maxCalls": 12,
+          "maxInputTokens": 65536,
+          "maxOutputTokens": 4096,
+          "inputUsdPerMillion": "0.00",
+          "outputUsdPerMillion": "0.00"
+        }
+      ],
+      "roles": {
+        "engineer": "cheap-engineer",
+        "critic": "frontier-review",
+        "reviewer": "frontier-review",
+        "escalation": "frontier-review"
+      },
+      "maxEngineeringAttempts": 2
+    }
+  ]
+}
