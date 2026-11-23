@@ -300,7 +300,7 @@ Dockerfile path to resume stock execution. Existing assignments keep their pinne
 environment. Local image import targets single-node K3s. Forge pins the digest
 against Kubernetes image garbage collection. Keep earlier digests while
 assignments may resume. Once an image is retired, an operator can remove its
-pin with `sudo k3s ctr images label '<repository>@sha256:<digest>' io.cri-containerd.pinned-`.
+pin with `sudo k3s ctr images label '<repository>@sha256:<digest>' io.cri-containerd.pinned=`.
 If the node is replaced, qualify the Dockerfile on the replacement.
 
 The project container receives the assigned checkout, a sanitized Git snapshot
