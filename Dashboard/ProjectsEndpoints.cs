@@ -14,6 +14,7 @@ public static class ProjectsEndpoints
 {
     public static IEndpointRouteBuilder MapProjectsEndpoints(this IEndpointRouteBuilder endpoints)
     {
+        endpoints.MapProjectWorkerEnvironmentEndpoints();
         var group = endpoints.MapGroup("/api/projects");
 
         group.MapGet("/", ListProjectsAsync)

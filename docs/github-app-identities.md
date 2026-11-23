@@ -7,29 +7,31 @@ The controller supports two repository-scoped GitHub Apps. Workers receive neith
 1. In GitHub Settings → Developer settings → GitHub Apps, register two private Apps with distinct names, for example `forge-publisher-<owner>` and `forge-reviewer-<owner>`. Use the repository URL as homepage. Disable webhook delivery here until the authenticated event endpoint is configured; reconciliation still operates. This setup does not implement webhook ingress.
 2. Publisher repository permissions: Contents **write**, Pull requests **write**, Issues **write** (labels), Workflows **write** (Forge can change its own workflows), Checks **read**, Actions **read** (download release workflow artifacts), Commit statuses **read**, Metadata **read**. Do not grant Administration permission or add it to a ruleset bypass list.
 3. Reviewer repository permissions: Contents **read**, Pull requests **write**, Checks **read**, Commit statuses **read**, Metadata **read**. No Contents write, Issues write, Actions, Administration or Workflows permission. GitHub's Pull requests write permission itself is broader than review submission; Forge restricts use of this credential to review operations.
-4. Install each App on **Only select repositories** → Forge. Record App ID, App slug and installation ID separately. Generate a private key for each App and place each PEM in a controller provisioning directory with restricted access. Never paste PEMs into chat, commit them, put them in project files or mount them in workers.
-5. Save `config.json` in that private provisioning directory, replacing all values:
-
-```json
-{"repositories":[{"owner":"Xyrces","name":"Forge","publisher":{"appId":123,"installationId":456,"slug":"forge-publisher-example","privateKeyFile":"/run/forge-github-apps/publisher.pem"},"reviewer":{"appId":789,"installationId":1011,"slug":"forge-reviewer-example","privateKeyFile":"/run/forge-github-apps/reviewer.pem"}}]}
-```
-
-6. From the trusted administrator terminal, create the namespace Secret without writing credentials into a command argument:
+4. Install each App on **Only select repositories** and select the repository you want Forge to develop. Record each App ID, App slug and installation ID. The App ID is on its settings page, the slug appears in its public App URL, and the installation ID appears in the installation settings URL. Generate a private key for each App.
+5. On the Linux host, prepare the private bundle directory using the `forge_setup` location from the [installation quickstart](../README.md#installation-quickstart).
 
 ```bash
-kubectl -n forge create secret generic forge-github-apps \
-  --from-file=config.json=./config.json \
-  --from-file=publisher.pem=./publisher.pem \
-  --from-file=reviewer.pem=./reviewer.pem \
-  --from-literal=config-path=/run/forge-github-apps/config.json \
-  --dry-run=client -o yaml | kubectl apply -f -
+install -d -m 700 "$forge_setup/github-apps"
 ```
 
-The controller mounts the optional Secret and reads `FORGE_GITHUB_APPS_FILE` from its `config-path` key. Deploy a qualified controller revision to activate or change an App mapping. A configured but missing or invalid file fails the preflight check.
+Copy the downloaded publisher key into that directory as `publisher.pem` and the reviewer key as `reviewer.pem`. Keep them outside your project checkout. Create `config.json` alongside them, replacing the example owner, repository, numbers and App slugs below. Preserve the `/run/forge-github-apps/` paths, which are the keys' locations inside the controller.
+
+```json
+{"repositories":[{"owner":"your-owner","name":"your-repository","publisher":{"appId":123,"installationId":456,"slug":"your-publisher-app","privateKeyFile":"/run/forge-github-apps/publisher.pem"},"reviewer":{"appId":789,"installationId":1011,"slug":"your-reviewer-app","privateKeyFile":"/run/forge-github-apps/reviewer.pem"}}]}
+```
+
+Protect all three files, then supply the bundle when installing Forge.
+
+```bash
+chmod 600 "$forge_setup/github-apps/config.json" \
+  "$forge_setup/github-apps/publisher.pem" "$forge_setup/github-apps/reviewer.pem"
+```
+
+6. Complete the bundle before running the quickstart's preview and first `--apply`. Its install command includes the bundle through `--github-apps-directory "$forge_setup/github-apps"` when the directory is present. The installer creates the namespace and the controller's private Secret. The controller reads it at startup. Existing installations require an explicit configuration-maintenance operation to change the bundle and a controller replacement to load it. A configured but missing or invalid file fails preflight.
 
 For a repository with personal-token authentication, select **Human reviewer** in **Project overview → Pull request approvals**. An eligible human other than the author must approve the current revision. The default **Forge reviewer** policy and **Forge and human reviewers** both require distinct publisher and reviewer Apps. Without that mapping, the project control explains what to fix, `--check` reports the affected project, and Forge holds its engineering tasks before assigning a worker. Other projects can continue. Fresh-install bootstrap can use its existing provisioning credential.
 
-7. In a disposable protected repository, install the same Apps with only that repository selected in their token request configuration. Verify a publisher-authored PR receives a formal reviewer approval, a human request for changes stops merging, and a correction requires approval of the new head. Verify the actual merge occurs without a bypass. Only then switch Forge's production project to these credentials. Preserve any active human holds during rollout or rollback.
+7. Register the configured repository in **Projects → Add Project** and choose **Forge reviewer** in its **Pull request approvals** settings. Start with a small change and inspect the resulting PR. It should be authored by the publisher App, reviewed by the reviewer App and merged after the repository's checks and review rules pass. A human request for changes blocks merging until a correction receives the required approvals. An additional test repository needs its own entry in `repositories` and both Apps installed there.
 
 Remove obsolete persistent personal-token credential files from the trusted controller clone during the explicit migration after confirming other services do not depend on them. App tokens themselves are never written to those files: Git uses a repository-URL-scoped authorization header provided only to the controller's child process.
 
@@ -44,6 +46,8 @@ The initial supported layout is a normal SHA1 project clone with engineering wor
 References: [installation tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app), [installation Git authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation), [App manifest registration](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest).
 
 ## Guided private setup
+
+The helper below is configured specifically for `Xyrces/Forge`. Use the manual steps above for your own repository.
 
 With the App configuration mounted, `--check` uses the registered project's
 repository and resolves both installation credentials. It reads repository and

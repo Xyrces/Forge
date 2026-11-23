@@ -1,18 +1,21 @@
 # Forge
 
-Forge is a self-hosted tool for developing software with AI agents. You describe a change, work out what counts as done, and approve the brief. Forge plans a sprint, assigns the work, and follows the pull requests through testing, review, and delivery. You can open the sprint board at any point to see where things stand or ask to review a change yourself.
-
-We use Forge on its own repository. One sprint started with a 404 in the browser console. The dashboard was loading a tool that only developers needed. We wanted to keep it available in development and stop requesting it in production. The review caught an unrelated test edit. When the task got stuck, we put it back in the queue. The fix merged on the original pull request. You can follow the [actual review and correction](docs/workflow-audit/pr150-history.md#review-decisions-and-revisions).
+Forge runs AI agents on your own infrastructure. You describe a change and approve what counts as done. Forge plans a sprint, writes and tests the code, and opens a pull request. You can follow the work on the sprint board and step in for a review.
 
 ## Installation quickstart
 
-This installs Forge on one Linux host and gives you a private dashboard with Forge registered as its first project. The starter configuration keeps paid model calls disabled while you check the installation.
+You'll install Forge on one Linux machine, open its private dashboard and add a repository you own. The installer sets up K3s and starts Forge with the work gates held. You choose when agents can start building.
 
-### 1. Prepare the host and database
+**What you need**
 
-Use an x86-64 Linux host with systemd, Bash, Python 3, Git, `jq`, and a regular login with sudo access. The installer can set up K3s with embedded etcd. You can also use an existing single-node K3s installation with embedded etcd. The host needs network access to GitHub, GHCR, and your Azure SQL database.
+- An x86-64 Linux host with systemd, sudo, Bash, Python 3.9 or newer, Git, `jq` and the [GitHub CLI](https://cli.github.com/). Use a regular login. The installation requests a 40 GiB volume for Forge.
+- An Azure subscription where you can create a SQL database and manage its network access.
+- A GitHub account with read access to the published Forge container image and private Talaria packages. A package token needs that underlying access even though the Forge repository is public.
+- For a real first sprint, an OpenAI API key and a GitHub repository where you can install Apps. You can explore the dashboard before enabling model calls.
 
-Start in a fresh checkout. Keep the installation files outside it.
+### 1. Get the installer and matching release
+
+Run these steps in **one Bash session on the Linux host**. Use `gh auth login` if you haven't signed in there. The image receipt comes from a successful Forge build and identifies the exact version to install. [Image builds on main](https://github.com/Xyrces/Forge/actions/workflows/controller-image.yml?query=branch%3Amain)
 
 ```bash
 git clone https://github.com/Xyrces/Forge.git
@@ -20,93 +23,73 @@ cd Forge
 umask 077
 forge_setup="$HOME/.config/forge-install"
 install -d -m 700 "$forge_setup"
-if [[ ! -e "$forge_setup/appsettings.json" ]]; then
-  install -m 600 deploy/k3s/appsettings.first-install.json "$forge_setup/appsettings.json"
+run_id=$(gh run list --repo Xyrces/Forge --workflow controller-image.yml --branch main \
+  --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+release="$forge_setup/releases/$run_id"
+receipt="$release/forge-image-receipt.json"
+if [[ ! -s "$receipt" ]]; then
+  gh run download "$run_id" --repo Xyrces/Forge --name forge-image-receipt --dir "$release"
+fi
+if [[ ! -d "$release/source" ]]; then
+  git worktree add --detach "$release/source" "$(jq -er .sourceSha "$receipt")"
 fi
 ```
 
-Have a database administrator prepare an empty Azure SQL database and three users in it. The initializer needs permission to create schemas and grant access. The controller and workers use separate runtime accounts. Set the two runtime user names in your private `appsettings.json` to match the database. The sample sets a $25 spending ceiling with paid calls switched off. Choose the ceiling you want recorded for this new installation.
+If the download reports an expired or missing artifact, choose a successful `main` build with an available **forge-image-receipt** in the image builds link above. Use that run's number for `run_id` and repeat the download and checkout.
 
-Put these files in `$forge_setup` before continuing. The [private file examples and SQL permissions](deploy/k3s/README.md#prepare-the-private-install-files) show the expected formats.
+### 2. Prepare your database and credentials
 
-| Files | What goes in them |
-| --- | --- |
-| `sql-controller.txt`, `sql-initialize.txt`, `sql-worker.txt` | One connection string per file, all pointing to the same database, each using its own account. |
-| `worker-packages.json` | A GitHub username and token with read access to the private Talaria packages used in worker builds. |
-| `registry.json` | Docker-format registry credentials with read access to the Forge image in GHCR. |
+Create an empty Azure SQL database in the portal and allow the Linux host's public outbound IP. Save the server login you create. You'll use it once to give Forge access. [Portal steps and database permissions](deploy/k3s/README.md#create-the-database-and-its-three-logins)
 
-### 2. Select a release and preview the install
-
-Open a successful **Build immutable Forge controller image** run for the reviewed commit on `main`. Download its **forge-image-receipt** artifact and extract `forge-image-receipt.json` into `$forge_setup`. The receipt identifies the exact code revision and container image tested together. [Controller image builds](https://github.com/Xyrces/Forge/actions/workflows/controller-image.yml?query=branch%3Amain)
-
-In the same Bash session, switch the installer to that revision and create a dataset ID. Keep the ID file for retries and future releases on this installation.
+Generate your private installation files. Have the database name and server hostname ready, along with your GitHub username, a classic token with `read:packages`, and your OpenAI key. To explore the dashboard with paid calls off, omit `--enable-models`. Choose before installing because ordinary upgrades reuse these settings. [GitHub package access](https://docs.github.com/en/packages/learn-github-packages/introduction-to-github-packages#authenticating-to-github-packages)
 
 ```bash
-receipt="$forge_setup/forge-image-receipt.json"
-git switch --detach "$(jq -er .sourceSha "$receipt")"
-if [[ ! -e "$forge_setup/dataset-id" ]]; then
-  python3 -c 'import uuid; print(uuid.uuid4())' > "$forge_setup/dataset-id"
-fi
+inputs="$forge_setup/inputs"
+python3 docs/examples/prepare-first-install.py "$inputs" \
+  --template "$release/source/deploy/k3s/appsettings.first-install.json" --enable-models
 ```
 
-Define the install command once so the preview and apply use the same inputs. The K3s version and checksum below match the Linux host running Forge. If K3s is already installed, the installer checks the existing cluster. [K3s release and checksums](https://github.com/k3s-io/k3s/releases/tag/v1.37.2%2Bk3s1)
-
-```bash
-forge_install() {
-  python3 deploy/k3s/install.py \
-    --image "$(jq -er .imageDigest "$receipt")" \
-    --source-sha "$(git rev-parse HEAD)" --image-receipt "$receipt" \
-    --dataset "$(cat "$forge_setup/dataset-id")" --operation first-install \
-    --sql-file "$forge_setup/sql-controller.txt" \
-    --initialize-sql-file "$forge_setup/sql-initialize.txt" \
-    --worker-sql-file "$forge_setup/sql-worker.txt" \
-    --worker-packages-file "$forge_setup/worker-packages.json" \
-    --registry-config "$forge_setup/registry.json" \
-    --config "$forge_setup/appsettings.json" \
-    --k3s-version 'v1.37.2+k3s1' \
-    --k3s-sha256 '265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda' \
-    "$@"
-}
-forge_install
-```
-
-Look for `"mode": "plan"`, namespace `forge`, and the source revision you chose. This checks the local inputs and their match to the receipt. The image pull and database connection happen when you apply the plan.
+1. Open `$inputs/create-users.sql` in your editor. In the Azure portal, open **your database → Query editor**, sign in with the server login, paste the SQL and choose **Run**. Success lists three users for initialization, the controller and workers. Keep the script private. It contains their generated passwords.
+2. For real work, review `Budget.LimitUsd` and `Budget.MaximumRequestUsd` in `$inputs/appsettings.json`. The example starts at **$25 total and $2 per request**. Register the publisher and reviewer Apps on **your** repository and save their bundle in `$forge_setup/github-apps`. One person can own both Apps. [GitHub App setup](docs/github-app-identities.md#register-and-install-one-time-human-setup)
 
 ### 3. Install and open the dashboard
 
-On the Linux host, apply the plan. After **Release completed**, the second command prints the private address of the Forge service.
+Preview the installation. This calls the selected release's installer and checks your files against its image receipt. Look for `"mode": "plan"` and the revision you selected.
 
 ```bash
-forge_install --apply &&
+bash docs/examples/install-first-release.sh "$forge_setup" "$run_id"
+```
+
+When the preview looks right, apply it on the **Linux host**. Keep the same inputs and run ID for a retry. After `Release completed`, the second command prints the private service IP.
+
+```bash
+sudo -v && bash docs/examples/install-first-release.sh "$forge_setup" "$run_id" --apply &&
   sudo /usr/local/bin/k3s kubectl -n forge get svc forge -o jsonpath='{.spec.clusterIP}{"\n"}'
 ```
 
-On **your workstation**, replace `FORGE_SERVICE_IP` with that address and `your-user@your-linux-host` with your SSH login. Your SSH account needs permission to forward to that service on port 8080. Leave this terminal open while you use the dashboard.
+On **your workstation**, substitute that IP and your SSH login below. Leave the terminal open and visit [the dashboard](http://127.0.0.1:4097). The [build information](http://127.0.0.1:4097/api/meta/buildinfo) should show a `sourceRevision` matching the receipt. The SSH tunnel keeps the dashboard private.
 
 ```sh
 ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:4097:FORGE_SERVICE_IP:8080 your-user@your-linux-host
 ```
 
-Open `http://127.0.0.1:4097` in your browser. You should see **Forge** in the project selector. At `http://127.0.0.1:4097/api/meta/buildinfo`, compare `sourceRevision` with `sourceSha` in your receipt. When they match, you’re looking at the release you installed.
+If you're browsing on the Linux host itself, run `sudo /usr/local/bin/k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080` and open [the local dashboard](http://127.0.0.1:8080).
 
-If you’re using a browser **on the Linux host itself**, run `sudo /usr/local/bin/k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080` and open `http://127.0.0.1:8080` there.
+## Give Forge its first piece of work
 
-The starter lets you explore the dashboard with the workflow gates held. Intake uses canned replies until a controller starts with a configured model key. To run real work, prepare the provider credentials, spending policy, and repository access, then restart the controller with the updated configuration before opening the gates. [Configuration and credential setup](deploy/k3s/README.md#prepare-the-private-install-files)
+The first project in the selector is **Forge** itself. Open **Projects → Add Project**, register your own repository and select it in the top bar. In **Intake → New idea**, describe one small change and how you'll recognize success. For example, “Add a search box to the issue list. When I clear it, I should see all the issues again.”
 
-## How Forge works
+Read the **Working brief** beside the conversation. Ask for changes there, then choose **Approve revision** when it describes the work you want. **Open specification** shows what went into planning. When you're ready for execution, release the relevant stage holds and follow the cards in **Sprints**. [First-initiative walkthrough](docs/user-guide.md#run-your-first-initiative)
 
-1. **Give the project direction.** Use the Vision Board to describe what you're building and the design choices you want future work to respect. You can refine the mind map in conversation as the project takes shape.
-2. **Agree on a change.** Start an idea in Intake. The conversation and working brief sit together so you can ask for a revision, see exactly what changed, and approve the version you want built.
-3. **Follow the sprint.** Forge turns the approved work into tasks and runs independent tasks in parallel when workers are available. Each card links to the work behind it. If a change needs your eyes, you can require a human review while the sprint is underway.
-4. **Decide where it ships.** Each project can choose its sprint deployment target. Forge itself closes the sprint when the release passes its deployment checks in the user acceptance testing (UAT) environment. From Deployments, you can pick that tested release and promote it to staging or production.
+## Where to go next
 
-## Documentation
-
-| When you're ready to… | Read |
+| I want to… | Guide |
 | --- | --- |
-| Give Forge its first initiative | [Using Forge](docs/user-guide.md) |
-| Set up separate GitHub publisher and reviewer identities | [GitHub App setup](docs/github-app-identities.md) |
-| Configure model access, spending, or logs | [Runtime reference](docs/runtime-reference.md) |
-| Choose where a sprint deploys or promote a release | [Deployment environments](docs/deployment-environments.md) |
-| Build Forge and run the tests from source | [Contributor quickstart](docs/getting-started.md#build-and-test-the-code) |
-| Find architecture notes, runbooks, and design history | [Documentation index](docs/README.md) |
+| Shape the project vision, follow a sprint or review a PR | [Using Forge](docs/user-guide.md) |
+| Give workers a compiler or other project-specific tools | [Project worker Dockerfiles](deploy/k3s/README.md#project-worker-tools) |
+| Change models, spending limits or stage gates | [Runtime reference](docs/runtime-reference.md) |
+| Set up UAT and promote a release to staging or production | [Deployment environments](docs/deployment-environments.md) |
+| Upgrade Forge or recover an installation | [K3s operations](deploy/k3s/README.md#independent-release-and-rollback) |
+| Work on Forge itself | [Contributor quickstart](docs/getting-started.md#build-and-test-the-code) |
+
+[All documentation](docs/README.md) · [A real sprint from review through correction](docs/workflow-audit/pr150-history.md#review-decisions-and-revisions)

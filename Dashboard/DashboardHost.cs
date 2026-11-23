@@ -58,6 +58,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ProjectContextFactory? _projectFactory;
     private readonly SlotTable? _slots;
     private readonly IProjectStore? _projectStore;
+    private readonly IProjectWorkerEnvironmentStore? _workerEnvironments;
     private readonly IProjectProvisioner? _projectProvisioner;
     private readonly ProjectCloner? _projectCloner;
     private readonly Forge.Core.SecretStore? _secretStore;
@@ -145,13 +146,15 @@ public sealed class DashboardHost : IAsyncDisposable
         string? mutationTokenFile = null,
         Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? workerHistory = null,
         IProjectProvisioner? projectProvisioner = null, Forge.Deploy.IRoutineReleaseSource? releaseSource = null, Action? wakeDelivery = null,
-        IVisionConversation? visionConversation = null)
+        IVisionConversation? visionConversation = null, IProjectWorkerEnvironmentStore? workerEnvironments = null)
     {
         _projectProvisioner = projectProvisioner;
         _releaseSource = releaseSource;
         _wakeDelivery = wakeDelivery;
         _mutationTokenFile = mutationTokenFile;
         _workerHistory = workerHistory;
+        _workerEnvironments = workerEnvironments ?? (projectStore is ProjectStore registry
+            ? new ProjectWorkerEnvironmentStore(registry) : null);
         _initiativeApprovals = initiativeApprovals;
         _options = options;
         _headroom = headroom;
@@ -269,6 +272,7 @@ public sealed class DashboardHost : IAsyncDisposable
         if (_slots is not null) builder.Services.AddSingleton(_slots);
         if (_projectFactory is not null) builder.Services.AddSingleton<Forge.Deploy.DeploymentExecutorFactory>();
         if (_projectStore is not null) builder.Services.AddSingleton(_projectStore);
+        if (_workerEnvironments is not null) builder.Services.AddSingleton(_workerEnvironments);
         if (_projectProvisioner is not null) builder.Services.AddSingleton(_projectProvisioner);
         if (_projectCloner is not null) builder.Services.AddSingleton(_projectCloner);
         if (_githubOptions is not null) builder.Services.AddSingleton(_githubOptions);

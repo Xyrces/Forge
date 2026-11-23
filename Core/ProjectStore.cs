@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Text.Json.Nodes;
 using Forge.Core.Db;
 
 namespace Forge.Core;
@@ -117,7 +118,8 @@ public interface IProjectStore
 public sealed class ProjectStore : IProjectStore, IAsyncDisposable
 {
     private readonly IssueStore _issues;
-    public ProjectStore(IssueStore issues) { _issues = issues; }
+    internal ProjectSettingsJson Settings { get; }
+    public ProjectStore(IssueStore issues) { _issues = issues; Settings = new(issues); }
 
     private string T(string name) => _issues.Db.Dialect.Table(name);
 
@@ -156,6 +158,23 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
             await ins.ExecuteNonQueryAsync(ct);
         }
 
+        // The source identity and its executable-image approval are one binding.
+        // The insert/lock above serializes this read with concurrent registry writers.
+        // Rotating the environment tokens also makes an already-running build stale.
+        string? reboundSettings = null;
+        await using (var source = conn.CreateCommand())
+        {
+            source.Transaction = tx;
+            source.CommandText = $"SELECT repo_url, default_branch, roles_json FROM {T("project")} WHERE id=@id";
+            source.AddParam("@id", p.Id);
+            await using var reader = await source.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct)
+                && (reader.GetString(0) != p.RepoUrl
+                    || reader.GetString(1) != (string.IsNullOrWhiteSpace(p.DefaultBranch) ? "main" : p.DefaultBranch)))
+                reboundSettings = ProjectWorkerEnvironmentStore.InvalidateSourceBinding(
+                    reader.IsDBNull(2) ? null : reader.GetString(2));
+        }
+
         await using (var upd = conn.CreateCommand())
         {
             upd.Transaction = tx;
@@ -164,6 +183,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
                 name = @name,
                 repo_url = @url,
                 default_branch = @branch,
+                roles_json = CASE WHEN @rebound IS NULL THEN roles_json ELSE @rebound END,
                 updated_at = @now
                 WHERE id = @id
                 """;
@@ -172,6 +192,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
             upd.AddParam("@url", p.RepoUrl);
             upd.AddParam("@branch", string.IsNullOrWhiteSpace(p.DefaultBranch) ? "main" : p.DefaultBranch);
             upd.AddParam("@now", IssueStore.DateFormatTime(now));
+            upd.AddParam("@rebound", reboundSettings);
             await upd.ExecuteNonQueryAsync(ct);
         }
 
@@ -247,75 +268,48 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task<bool> UpdateRolesAsync(string id, IReadOnlyDictionary<string, int> roles, CancellationToken ct = default)
+    public Task<bool> UpdateRolesAsync(string id, IReadOnlyDictionary<string, int> roles, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(roles);
-        await using var conn = await _issues.Db.OpenAsync(ct);
-        var existing = await ReadRolesJsonAsync(conn, id, ct);
-        var json = SerializeRolesJson(roles, existing.Territories, existing.Verify, existing.TriageEnabled, existing.QaEnabled, existing.QaVisualPaths);
-        return await WriteRolesJsonAsync(conn, id, json, ct);
+        return Settings.MutateAsync(id, obj =>
+        {
+            foreach (var key in obj.Select(p => p.Key).Where(k => !k.StartsWith('$')).ToArray()) obj.Remove(key);
+            foreach (var (key, value) in roles) if (!key.StartsWith('$')) obj[key] = value;
+        }, ct);
     }
 
-    public async Task<bool> UpdateTerritoriesAsync(string id, IReadOnlyDictionary<string, RoleTerritory> territories, CancellationToken ct = default)
+    public Task<bool> UpdateTerritoriesAsync(string id, IReadOnlyDictionary<string, RoleTerritory> territories, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(territories);
-        await using var conn = await _issues.Db.OpenAsync(ct);
-        var existing = await ReadRolesJsonAsync(conn, id, ct);
-        if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, territories, existing.Verify, existing.TriageEnabled, existing.QaEnabled, existing.QaVisualPaths);
-        return await WriteRolesJsonAsync(conn, id, json, ct);
+        return Settings.MutateAsync(id, obj =>
+        {
+            var block = new JsonObject();
+            foreach (var (key, value) in territories)
+                block[key] = new JsonObject { ["prefixes"] = Strings(value.Prefixes), ["rootFiles"] = value.AllowsRootFiles };
+            obj[TerritoryKey] = block;
+        }, ct);
     }
 
-    public async Task<bool> UpdateVerifyCommandsAsync(string id, IReadOnlyList<string> commands, CancellationToken ct = default)
+    public Task<bool> UpdateVerifyCommandsAsync(string id, IReadOnlyList<string> commands, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(commands);
-        await using var conn = await _issues.Db.OpenAsync(ct);
-        var existing = await ReadRolesJsonAsync(conn, id, ct);
-        if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, existing.Territories, commands, existing.TriageEnabled, existing.QaEnabled, existing.QaVisualPaths);
-        return await WriteRolesJsonAsync(conn, id, json, ct);
+        return Settings.MutateAsync(id, obj => obj[VerifyKey] = Strings(commands), ct);
     }
 
-    public async Task<bool> UpdateTriageAsync(string id, bool enabled, CancellationToken ct = default)
-    {
-        await using var conn = await _issues.Db.OpenAsync(ct);
-        var existing = await ReadRolesJsonAsync(conn, id, ct);
-        if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, existing.Territories, existing.Verify, enabled, existing.QaEnabled, existing.QaVisualPaths);
-        return await WriteRolesJsonAsync(conn, id, json, ct);
-    }
+    public Task<bool> UpdateTriageAsync(string id, bool enabled, CancellationToken ct = default)
+        => Settings.MutateAsync(id, obj => obj[TriageKey] = new JsonObject { ["enabled"] = enabled }, ct);
 
-    public async Task<bool> UpdateQaAsync(string id, bool enabled, IReadOnlyList<string>? visualPaths = null, CancellationToken ct = default)
-    {
-        await using var conn = await _issues.Db.OpenAsync(ct);
-        var existing = await ReadRolesJsonAsync(conn, id, ct);
-        if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, existing.Territories, existing.Verify, existing.TriageEnabled, enabled,
-            visualPaths ?? existing.QaVisualPaths);
-        return await WriteRolesJsonAsync(conn, id, json, ct);
-    }
+    public Task<bool> UpdateQaAsync(string id, bool enabled, IReadOnlyList<string>? visualPaths = null, CancellationToken ct = default)
+        => Settings.MutateAsync(id, obj =>
+        {
+            var qa = obj[QaKey] as JsonObject;
+            if (qa is null) { qa = new JsonObject(); obj[QaKey] = qa; }
+            qa["enabled"] = enabled;
+            if (visualPaths is not null) qa["visualPaths"] = Strings(visualPaths);
+        }, ct);
 
-    private async Task<(bool Exists, IReadOnlyDictionary<string, int> Roles, IReadOnlyDictionary<string, RoleTerritory> Territories, IReadOnlyList<string>? Verify, bool TriageEnabled, bool QaEnabled, IReadOnlyList<string>? QaVisualPaths)> ReadRolesJsonAsync(
-        System.Data.Common.DbConnection conn, string id, CancellationToken ct)
-    {
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""SELECT roles_json FROM {T("project")} WHERE id = @id""";
-        cmd.AddParam("@id", id);
-        var raw = await cmd.ExecuteScalarAsync(ct);
-        if (raw is null || raw is DBNull) return (false, new Dictionary<string, int>(), new Dictionary<string, RoleTerritory>(), null, false, false, null);
-        var (roles, territories) = ParseRolesJson(raw as string);
-        return (true, roles, territories, ParseVerify(raw as string), ParseTriage(raw as string), ParseQa(raw as string), ParseQaVisualPaths(raw as string));
-    }
-
-    private async Task<bool> WriteRolesJsonAsync(System.Data.Common.DbConnection conn, string id, string json, CancellationToken ct)
-    {
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""UPDATE {T("project")} SET roles_json = @roles, updated_at = @now WHERE id = @id""";
-        cmd.AddParam("@id", id);
-        cmd.AddParam("@roles", json);
-        cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
-        return await cmd.ExecuteNonQueryAsync(ct) > 0;
-    }
+    private static JsonArray Strings(IEnumerable<string> values)
+        => new(values.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray());
 
     private static ProjectRecord Read(DbDataReader rd) => new(
         Id: rd.GetString(0),
@@ -473,56 +467,6 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
             result[kv.Key] = new RoleTerritory(prefixes, rootFiles);
         }
         return result;
-    }
-
-    private static string SerializeRolesJson(
-        IReadOnlyDictionary<string, int> roles,
-        IReadOnlyDictionary<string, RoleTerritory> territories,
-        IReadOnlyList<string>? verifyCommands = null,
-        bool triageEnabled = false,
-        bool qaEnabled = false,
-        IReadOnlyList<string>? qaVisualPaths = null)
-    {
-        var obj = new System.Text.Json.Nodes.JsonObject();
-        foreach (var kv in roles)
-        {
-            if (kv.Key.StartsWith('$')) continue;
-            obj[kv.Key] = kv.Value;
-        }
-        if (territories.Count > 0)
-        {
-            var block = new System.Text.Json.Nodes.JsonObject();
-            foreach (var kv in territories)
-            {
-                block[kv.Key] = new System.Text.Json.Nodes.JsonObject
-                {
-                    ["prefixes"] = new System.Text.Json.Nodes.JsonArray(
-                        kv.Value.Prefixes.Select(p => System.Text.Json.Nodes.JsonValue.Create(p)).ToArray()),
-                    ["rootFiles"] = kv.Value.AllowsRootFiles,
-                };
-            }
-            obj[TerritoryKey] = block;
-        }
-        if (verifyCommands is not null)
-        {
-            obj[VerifyKey] = new System.Text.Json.Nodes.JsonArray(
-                verifyCommands.Select(c => (System.Text.Json.Nodes.JsonNode)System.Text.Json.Nodes.JsonValue.Create(c)!).ToArray());
-        }
-        if (triageEnabled)
-        {
-            obj[TriageKey] = new System.Text.Json.Nodes.JsonObject { ["enabled"] = true };
-        }
-        if (qaEnabled || qaVisualPaths is not null)
-        {
-            var qa = new System.Text.Json.Nodes.JsonObject { ["enabled"] = qaEnabled };
-            if (qaVisualPaths is not null)
-            {
-                qa["visualPaths"] = new System.Text.Json.Nodes.JsonArray(
-                    qaVisualPaths.Select(p => (System.Text.Json.Nodes.JsonNode)System.Text.Json.Nodes.JsonValue.Create(p)!).ToArray());
-            }
-            obj[QaKey] = qa;
-        }
-        return obj.ToJsonString();
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;

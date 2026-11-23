@@ -111,6 +111,24 @@ public sealed class BashTool
 
         var timeout = TimeSpan.FromSeconds(Math.Clamp(timeoutSeconds ?? (int)_defaultTimeout.TotalSeconds, 1, 300));
 
+        if (!string.IsNullOrWhiteSpace(ToolchainCommand.SocketPath))
+        {
+            var scopedRedactor = new ToolSecretRedactor((_envVars ?? new Dictionary<string, string>())
+                .Select(e => new KeyValuePair<string, string?>(e.Key, e.Value))
+                .Concat(Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
+                    .Select(e => new KeyValuePair<string, string?>((string)e.Key, e.Value?.ToString()))));
+            try
+            {
+                var result = await ToolchainCommand.RunAsync(ToolchainCommand.SocketPath!, command, cwd, timeout, ct, _envVars);
+                return scopedRedactor.Redact($"exit={result.ExitCode}\nstdout:\n{result.Stdout}\nstderr:\n{(result.TimedOut ? $"timed out after {(int)timeout.TotalSeconds}s\n" : "")}{result.Stderr}");
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                return scopedRedactor.Redact($"exit=-1\nstdout:\nstderr: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         // P4 CI: BashTool was hardcoded to cmd.exe for the Windows
         // first-deployment. CI on ubuntu-latest needs the POSIX
         // shell instead. /bin/sh exists on macOS, Linux, and

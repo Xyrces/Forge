@@ -2,6 +2,13 @@
 # Build with --secret id=nuget_config,src=<private authenticated config>.
 # Credentials never enter ARG/ENV, image history, or runtime layers.
 ARG SDK_IMAGE
+FROM ${SDK_IMAGE} AS command-helper
+RUN apt-get update && apt-get install -y --no-install-recommends golang-go \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/k3s/command-server/*.go /src/
+RUN go test /src/main.go /src/main_test.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /forge-command-server /src/main.go
+
 FROM ${SDK_IMAGE} AS build
 RUN apt-get update && apt-get install -y --no-install-recommends git python3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -26,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git python3 ca-
     && git config --system core.hooksPath /dev/null
 WORKDIR /app
 COPY --from=build /publish/ ./
+COPY --from=command-helper /forge-command-server /app/forge-command-server
 COPY deploy/k3s/ /app/deploy/k3s/
 ARG SOURCE_REVISION
 RUN printf '%s' "$SOURCE_REVISION" > /app/source-revision

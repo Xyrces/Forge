@@ -1,0 +1,85 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+@inject ILogger<TaskWorkerDependencies> Logger
+@implements IDisposable
+
+@if (_items is { Length: > 0 })
+{
+    <section class="card worker-dependencies" aria-label="Worker dependency proposals">
+        <h2>Worker dependencies</h2>
+        <p class="meta-text">Proposals for the project's worker environment. Acknowledging a proposal does not install software or restart work.</p>
+        @foreach (var item in _items)
+        {
+            <article class="worker-dependencies__item" @key="item.Id">
+                <div class="worker-environment__heading"><h3>@item.Tool</h3><span class="pill">@Label(item.Status)</span></div>
+                <p>@item.Reason</p>
+                <details><summary>Suggested environment change</summary><pre class="worker-environment__command">@item.SuggestedChange</pre></details>
+                @if (item.ReviewedAt is { } reviewed) { <p class="meta-text">Reviewed @reviewed.ToLocalTime().ToString("MMM d, HH:mm")</p> }
+                @if (item.Status == "pending")
+                {
+                    <div class="worker-environment__actions">
+                        <button class="btn" disabled="@_busy" @onclick='() => ReviewAsync(item.Id, "acknowledged")'>Acknowledge</button>
+                        <button class="btn" disabled="@_busy" @onclick='() => ReviewAsync(item.Id, "dismissed")'>Dismiss</button>
+                    </div>
+                }
+            </article>
+        }
+        <a href="@($"/projects/{Uri.EscapeDataString(ProjectId)}/overview")">Open project worker environment</a>
+    </section>
+}
+@if (_error is not null) { <div class="banner banner--warn" role="alert"><p>@_error</p><button class="btn" disabled="@_busy" @onclick="LoadAsync">Reload dependency requests</button></div> }
+
+@code {
+    [Parameter, EditorRequired] public string ProjectId { get; set; } = "";
+    [Parameter, EditorRequired] public string TaskId { get; set; } = "";
+    private sealed record Request(string Id, string Tool, string Reason, string SuggestedChange, string Status, DateTime? ReviewedAt);
+    private Request[]? _items;
+    private string? _target, _error;
+    private bool _busy;
+    private CancellationTokenSource _lifetime = new();
+    private string Target => ProjectId + "|" + TaskId;
+    private string Url => $"/api/tasks/{Uri.EscapeDataString(TaskId)}/worker-dependencies";
+    private string Query => "?projectId=" + Uri.EscapeDataString(ProjectId);
+    private static string Label(string status) => status switch { "acknowledged" => "Acknowledged", "dismissed" => "Dismissed", _ => "Needs review" };
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_target == Target) return;
+        _lifetime.Cancel(); _lifetime.Dispose(); _lifetime = new();
+        _target = Target; _items = null; _busy = false; _error = null;
+        await LoadAsync();
+    }
+    private async Task LoadAsync()
+    {
+        var target = Target; var ct = _lifetime.Token;
+        try
+        {
+            var items = await Http.GetFromJsonAsync<Request[]>(Url + Query, ct);
+            if (target == Target && !ct.IsCancellationRequested) { _items = items; _error = null; }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load task worker dependency requests");
+            if (target == Target && !ct.IsCancellationRequested) _error = "Could not load worker dependency proposals.";
+        }
+    }
+    private async Task ReviewAsync(string id, string status)
+    {
+        if (_busy || _target != Target) return;
+        var target = Target; var ct = _lifetime.Token; _busy = true;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync(Url + "/" + Uri.EscapeDataString(id) + Query, new { status }, ct);
+            response.EnsureSuccessStatusCode();
+            if (target == Target && !ct.IsCancellationRequested) await LoadAsync();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not review task worker dependency request");
+            if (target == Target && !ct.IsCancellationRequested) _error = "Could not confirm this decision. Reload requests before trying again.";
+        }
+        finally { if (target == Target && !ct.IsCancellationRequested) _busy = false; }
+    }
+    public void Dispose() { _lifetime.Cancel(); _lifetime.Dispose(); }
+}
