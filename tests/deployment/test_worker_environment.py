@@ -93,6 +93,21 @@ class EnvironmentBuildTests(unittest.TestCase):
         for url in ("http://127.0.0.1", "http://[::1]", "https://example.invalid"):
             self.assertTrue(worker.Dashboard(url, "demo", "test").base.startswith(url))
 
+    def test_retention_requires_the_requested_digest_and_cri_pin(self):
+        def observed(digests, pinned):
+            return subprocess.CompletedProcess([], 0, worker.json.dumps({
+                "status": {"repoDigests": digests, "pinned": pinned}}))
+        with mock.patch.object(worker.time, "sleep") as wait, \
+             mock.patch.object(subprocess, "run", side_effect=[
+                 subprocess.CompletedProcess([], 1), observed(["other"], True),
+                 observed(["image"], False), observed(["image"], True)]):
+            worker.confirm_retained("image")
+            self.assertEqual(3, wait.call_count)
+        with mock.patch.object(worker.time, "sleep"), \
+             mock.patch.object(subprocess, "run", return_value=observed(["image"], False)):
+            with self.assertRaisesRegex(ValueError, "retention"):
+                worker.confirm_retained("image")
+
     def test_https_and_ssh_github_clones_match(self):
         self.assertEqual(worker.repository_id("https://github.com/example/project.git"),
                          worker.repository_id("git@github.com:example/project.git"))

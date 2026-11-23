@@ -297,7 +297,11 @@ Refresh the project settings to see the active digest and source commit.
 Re-run the helper after changing the Dockerfile or its inputs on the default branch.
 For a rollback, revert that change and qualify the reverted commit, or save a blank
 Dockerfile path to resume stock execution. Existing assignments keep their pinned
-environment. Local image import targets single-node K3s.
+environment. Local image import targets single-node K3s. Forge pins the digest
+against Kubernetes image garbage collection. Keep earlier digests while
+assignments may resume. Once an image is retired, an operator can remove its
+pin with `sudo k3s ctr images label '<repository>@sha256:<digest>' io.cri-containerd.pinned-`.
+If the node is replaced, qualify the Dockerfile on the replacement.
 
 The project container receives the assigned checkout, a sanitized Git snapshot
 and project-scoped secrets explicitly supplied to a command. The trusted worker

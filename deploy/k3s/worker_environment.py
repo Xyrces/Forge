@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 from pathlib import Path, PurePosixPath
 from urllib import error, parse, request
@@ -98,6 +99,20 @@ def snapshot(repo, project, definition, dest):
     return sha, candidate
 
 
+def confirm_retained(pinned):
+    # The CRI cache observes containerd image updates asynchronously.
+    for attempt in range(10):
+        result = subprocess.run(["sudo", "-n", "k3s", "crictl", "inspecti", pinned],
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            status = json.loads(result.stdout)["status"]
+            if status.get("pinned") is True and pinned in status.get("repoDigests", []):
+                return
+        if attempt < 9:
+            time.sleep(0.5)
+    raise ValueError("K3s could not confirm retention of the qualified digest.")
+
+
 def qualify(dashboard, project_id, repo, check):
     settings = dashboard.call("/worker-environment")
     if not settings.get("dockerfilePath"):
@@ -133,8 +148,8 @@ def qualify(dashboard, project_id, repo, check):
         # An OCI import may register digest aliases under containerd's generated
         # import name. Give CRI the exact repository-qualified name used by Pods.
         run(ctr + ["tag", "--force", tag, pinned])
-        # CRI resolves Pod image references by repository + digest, including local-only images.
-        run(["sudo", "-n", "k3s", "crictl", "inspecti", pinned], stdout=subprocess.DEVNULL)
+        run(ctr + ["label", pinned, "io.cri-containerd.pinned=pinned"])
+        confirm_retained(pinned)
         dashboard.call("/worker-environment/qualify", {
             "expectedRevision": settings["revision"], "definitionRevision": settings["definitionRevision"],
             "image": pinned, "sourceRevision": sha})
