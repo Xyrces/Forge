@@ -70,6 +70,8 @@
             </div>
             @if (CanActOnLoadedTask && Prop(_task, "status") == "Pending" && !string.IsNullOrWhiteSpace(EffectiveProject))
             { <TaskRegroom @key="RecoveryTarget" TaskId="@TaskId" ProjectId="@(EffectiveProject!)" Requested="RegroomRequestedAsync" /> }
+            @if (CanActOnLoadedTask && !string.IsNullOrWhiteSpace(EffectiveProject))
+            { <TaskWorkerDependencies @key="RecoveryTarget" TaskId="@TaskId" ProjectId="@(EffectiveProject!)" /> }
             @if (_regroomNotice is not null && _regroomNoticeTarget == RecoveryTarget) { <p role="status">@_regroomNotice</p> }
         }
         else if (_section == "Review")

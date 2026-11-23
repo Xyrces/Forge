@@ -51,6 +51,7 @@ public static class TaskEndpoints
         Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? workerHistory = null)
     {
         TaskRegroomEndpoints.MapTaskRegroomEndpoints(app, issues, projectContexts, logger);
+        TaskWorkerDependencyEndpoints.MapTaskWorkerDependencyEndpoints(app, issues, projectContexts);
         TaskReviewHistoryEndpoints.Map(app, issues, projectContexts, gitHubForProject);
         app.MapGet("/api/tasks/{id}/workers", async (string id, string projectId, CancellationToken ct) =>
         {

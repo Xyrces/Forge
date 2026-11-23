@@ -261,6 +261,49 @@ Deploying for intervention/resume and never masquerades as a successful release.
 The controller can create Jobs and read journals, but cannot patch Deployments;
 only the dedicated release service account changes controller replicas/routes.
 
+## Project worker tools
+
+A project can supply a Dockerfile for the commands its K3s workers run. For example,
+a C++ project might add a compiler, CMake and Ninja. The stock Forge container
+continues to run the agent, enforce its plan and record its verification result.
+
+1. Commit the Dockerfile and its inputs to the project's default branch. Choose a
+   base image with Git, Bash and `/bin/sh`. Tools must work as UID/GID 10001 with
+   a read-only image filesystem, a writable task checkout for engineering work,
+   and a writable `/tmp`. Pin the base by digest for reproducible rebuilds.
+2. Open **Projects → your project → Worker environment**, enter the Dockerfile
+   path and build context, then save. Both paths are repository-relative. The
+   Dockerfile must be inside the context. The existing image continues serving
+   new assignments while the definition is pending.
+3. On the single K3s node, run the command below as the operator. It requires
+   rootless Podman, Git access to the registered origin, Python with tar extraction
+   filters, and permission to import images through `sudo -n k3s`. Point
+   `--dashboard` at the intended Forge instance through HTTPS or a loopback tunnel.
+
+   ```sh
+   python3 deploy/k3s/worker_environment.py \
+     --project <project-id> --repo <project-checkout> \
+     --dashboard <operator-url> --token-file <controller-token-file> \
+     --check 'cmake --version && ninja --version'
+   ```
+
+The helper fetches the registered default branch, exports the chosen context from
+that commit, builds the image and runs the optional project check offline. It
+imports the image into the local K3s runtime and activates its immutable digest
+only after all checks pass. A concurrent settings change requires a fresh build.
+Refresh the project settings to see the active digest and source commit.
+Re-run the helper after changing the Dockerfile or its inputs on the default branch.
+For a rollback, revert that change and qualify the reverted commit, or save a blank
+Dockerfile path to resume stock execution. Existing assignments keep their pinned
+environment. Local image import targets single-node K3s.
+
+The project container receives the assigned checkout, a sanitized Git snapshot
+and project-scoped secrets explicitly supplied to a command. The trusted worker
+holds Forge's SQL and model credentials. An engineering agent can use
+`request_worker_dependency` to record the missing tool, reason and suggested
+change. Open the task to acknowledge or dismiss the request. To adopt it, review
+the repository change and qualify the resulting image through the same flow.
+
 ## SQL identity separation and trust boundary
 
 Three distinct private connection files are required. `--sql-file` supplies the

@@ -21,6 +21,12 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        // Internal trusted init-container entry point; no config, SQL, provider keys or host services.
+        if (args.Length == 3 && args[0] == "--prepare-toolchain-git")
+        {
+            await ToolchainGitSnapshot.PrepareAsync(args[1], args[2], CancellationToken.None);
+            return 0;
+        }
         var mode = ParseMode(args);
         var configPath = ParseArg(args, "--config");
 

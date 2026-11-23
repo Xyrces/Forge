@@ -69,3 +69,10 @@ that Retry actually reaches the isolated fixture API, full evidence remains
 readable, compact task hydration performs one read, and oversized tasks use
 normal interactive reads. ASCII and escaping-heavy boundary probes measure
 retained startup frames against the unchanged transport limit.
+
+`node scripts/browser/worker-environment.spec.mjs /tmp/forge-worker-environment-ui`
+checks project worker definition saves, stale-revision conflicts, approved image
+provenance, and task dependency proposal acknowledgement/dismissal. It captures
+2560-pixel desktop and 390-pixel mobile layouts using the real Blazor components
+and synthetic loopback API. No image is built, task dispatched, or production
+configuration changed. Run separately from other fixture suites.

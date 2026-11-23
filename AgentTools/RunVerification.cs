@@ -122,6 +122,11 @@ public static class RunVerification
     private static async Task<(int ExitCode, string Output, bool TimedOut)> RunCommandAsync(
         string workDir, string command, TimeSpan timeout, CancellationToken ct)
     {
+        if (!string.IsNullOrWhiteSpace(ToolchainCommand.SocketPath))
+        {
+            var result = await ToolchainCommand.RunAsync(ToolchainCommand.SocketPath!, command, workDir, timeout, ct, verificationShell: true);
+            return (result.ExitCode, result.Stdout + "\n" + result.Stderr, result.TimedOut);
+        }
         var psi = new ProcessStartInfo
         {
             FileName = "/bin/bash",

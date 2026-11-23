@@ -1,5 +1,6 @@
 """Loopback-only browser fixtures. Never reads a Forge database or calls a provider."""
 import json
+import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -52,6 +53,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip('/')
+        if '/worker-dependencies/' in path:
+            body = self.read_body()
+            writes.append({'method': 'POST', 'path': self.path, 'body': body})
+            base, request_id = path.rsplit('/', 1)
+            for request in fixtures.get(base, []):
+                if request['id'] == request_id:
+                    request['status'] = body['status']
+                    return self.send(200, {})
+            return self.send(404, {'error': 'Synthetic dependency request not found'})
         if path.startswith('/api/deployments/') and path.endswith('/promote'):
             body = self.read_body()
             writes.append({'method': 'POST', 'path': self.path, 'body': body})
@@ -114,6 +124,15 @@ class Handler(BaseHTTPRequestHandler):
             writes.append({'path': path, 'body': body})
             fixtures[path] = body
             return self.send(200, body)
+        if path.endswith('/worker-environment'):
+            writes.append({'method': 'PUT', 'path': path, 'body': body})
+            current = fixtures.get(path, {})
+            if current.get('revision') != body.get('expectedRevision'):
+                return self.send(409, {'error': 'Worker environment changed. Reload before saving.'})
+            revision = str(int(current['revision']) + 1)
+            fixtures[path] = {**current, **body, 'revision': revision, 'definitionRevision': revision,
+                              'status': 'pending' if body['dockerfilePath'] else 'stock'}
+            return self.send(200, fixtures[path])
         if path.endswith('/environments'):
             writes.append({'method': 'PUT', 'path': path, 'body': body})
             current = fixtures.get(path, {})
@@ -146,4 +165,4 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, fixtures[path])
         return self.send(405, {'error': 'No fixture mutation for ' + path})
 
-ThreadingHTTPServer(('127.0.0.1', 5124), Handler).serve_forever()
+ThreadingHTTPServer(('127.0.0.1', int(os.environ.get('FORGE_REHEARSAL_API_PORT', '5124'))), Handler).serve_forever()

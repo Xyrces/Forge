@@ -1,0 +1,103 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+@inject ILogger<ProjectWorkerEnvironment> Logger
+@implements IDisposable
+
+<section class="card overview-section worker-environment" aria-labelledby="worker-environment-title">
+    <div class="worker-environment__heading"><h2 id="worker-environment-title">Worker environment</h2>@if (_current is not null) { <span class="pill">@StatusLabel</span> }</div>
+    <p>Define the tools this project needs in a Dockerfile committed to its repository. A trusted operator builds and qualifies the image before new workers use it.</p>
+    @if (_loading) { <p role="status">Loading worker environment…</p> }
+    else if (_current is not null)
+    {
+        <form class="form-grid" @onsubmit="SaveAsync" @onsubmit:preventDefault="true">
+            <label><span>Dockerfile path</span><input type="text" @bind="_dockerfile" maxlength="512" placeholder="Dockerfile.worker" disabled="@_busy" /><small>Relative to the repository. Leave blank to use Forge's stock image.</small></label>
+            <label><span>Build context</span><input type="text" @bind="_context" maxlength="512" placeholder="." disabled="@_busy" /><small>Repository-relative directory; usually a dot (.). The Dockerfile must be inside this directory.</small></label>
+            <div class="form-grid__full worker-environment__actions"><button class="btn" type="submit" disabled="@_busy">@(_busy ? "Saving…" : "Save definition")</button><button class="btn" type="button" disabled="@_busy" @onclick="LoadAsync">Reload saved environment</button></div>
+        </form>
+        @if (_current.Status == "pending") { <p class="banner banner--warn">This definition still needs a qualified build. @(_current.ApprovedImage is null ? "Workers continue using the stock image." : "Workers continue using the previous approved image.")</p> }
+        <dl class="worker-environment__facts">
+            <dt>Image used for new workers</dt><dd><code>@(_current.ApprovedImage ?? "Forge stock image")</code></dd>
+            <dt>Approved source revision</dt><dd><code>@(_current.ApprovedSourceRevision ?? "No project build activated")</code></dd>
+            @if (_current.ApprovedImage is not null)
+            { <dt>Approved build definition</dt><dd><code>@(_current.ApprovedDockerfilePath ?? "Not recorded")</code> · context <code>@(_current.ApprovedBuildContext ?? "Not recorded")</code></dd> }
+        </dl>
+        @if (!string.IsNullOrWhiteSpace(_current.DockerfilePath))
+        {
+            <details open><summary>Build and activate on the Linux installer host</summary>
+                <p>From the Forge checkout, use the trusted build helper with the project's clean checkout and your operator connection. Replace the example locations; the token file remains private on the installer host.</p>
+                <pre class="worker-environment__command">@BuildCommand</pre>
+                <p class="meta-text">Saving a definition or acknowledging a dependency request never builds an image. Activation affects future workers; running workers retain their assigned image.</p>
+            </details>
+        }
+    }
+    @if (_error is not null) { <p class="banner banner--warn" role="alert">@_error</p> }
+    @if (_current is null && !_loading) { <button class="btn" @onclick="LoadAsync">Retry loading environment</button> }
+    @if (_notice is not null) { <p role="status">@_notice</p> }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public string ProjectId { get; set; } = "";
+    private sealed record EnvironmentDto(string Revision, string DefinitionRevision, string? DockerfilePath, string BuildContext,
+        string? ApprovedImage, string? ApprovedSourceRevision, string? ApprovedDefinitionRevision, string Status,
+        string? ApprovedDockerfilePath = null, string? ApprovedBuildContext = null);
+    private sealed record ErrorDto(string Error);
+    private EnvironmentDto? _current;
+    private string? _loadedProject, _error, _notice;
+    private string _dockerfile = "", _context = ".";
+    private bool _loading, _busy;
+    private CancellationTokenSource _lifetime = new();
+    private string Url => $"/api/projects/{Uri.EscapeDataString(ProjectId)}/worker-environment";
+    private string StatusLabel => _current?.Status switch { "active" => "Qualified image active", "pending" => "Build needed", _ => "Stock image" };
+    private static string ShellQuote(string value) => "'" + value.Replace("'", "'\"'\"'") + "'";
+    private string BuildCommand => $"python3 deploy/k3s/worker_environment.py --project {ShellQuote(ProjectId)} --repo /path/to/project --dashboard '<operator-url>' --token-file /path/to/operator-token";
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedProject == ProjectId) return;
+        _lifetime.Cancel(); _lifetime.Dispose(); _lifetime = new();
+        _loadedProject = ProjectId; _current = null; _busy = false; _notice = null; _error = null;
+        await LoadAsync();
+    }
+    private void Apply(EnvironmentDto current) { _current = current; _dockerfile = current.DockerfilePath ?? ""; _context = current.BuildContext; }
+    private async Task LoadAsync()
+    {
+        var project = ProjectId; var ct = _lifetime.Token; _loading = true; _error = null;
+        try
+        {
+            var current = await Http.GetFromJsonAsync<EnvironmentDto>(Url, ct) ?? throw new InvalidOperationException("Empty worker environment response.");
+            if (project == ProjectId && !ct.IsCancellationRequested) Apply(current);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load project worker environment");
+            if (project == ProjectId && !ct.IsCancellationRequested) { _current = null; _error = "Could not load the worker environment. Reload before editing."; }
+        }
+        finally { if (project == ProjectId && !ct.IsCancellationRequested) _loading = false; }
+    }
+    private async Task SaveAsync()
+    {
+        if (_busy || _current is null || _loadedProject != ProjectId) return;
+        var project = ProjectId; var ct = _lifetime.Token; _busy = true; _notice = null; _error = null;
+        try
+        {
+            using var response = await Http.PutAsJsonAsync(Url, new { expectedRevision = _current.Revision,
+                dockerfilePath = string.IsNullOrWhiteSpace(_dockerfile) ? null : _dockerfile.Trim(), buildContext = _context.Trim() }, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                var detail = await response.Content.ReadFromJsonAsync<ErrorDto>(ct);
+                if (project == ProjectId && !ct.IsCancellationRequested) _error = detail?.Error ?? "Could not save. Reload the environment before trying again.";
+                return;
+            }
+            var current = await response.Content.ReadFromJsonAsync<EnvironmentDto>(ct) ?? throw new InvalidOperationException("Empty worker environment response.");
+            if (project == ProjectId && !ct.IsCancellationRequested) { Apply(current); _notice = "Definition saved. No build was started."; }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not save project worker environment");
+            if (project == ProjectId && !ct.IsCancellationRequested) _error = "Could not confirm the saved definition. Reload before trying again.";
+        }
+        finally { if (project == ProjectId && !ct.IsCancellationRequested) _busy = false; }
+    }
+    public void Dispose() { _lifetime.Cancel(); _lifetime.Dispose(); }
+}

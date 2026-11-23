@@ -1369,3 +1369,16 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
   [data-mobile-pane=conversation] > .intake-working-brief { display: none; }
   .intake-reader .intake-conversation__feed { max-height: 56dvh; }
 }
+
+/* Project worker environments and task dependency proposals. */
+.worker-environment .form-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.worker-environment .form-grid label { min-width: 0; }
+.worker-environment__heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.worker-environment__heading h2, .worker-environment__heading h3 { margin: 0; }
+.worker-environment__actions { display: flex; gap: .75rem; flex-wrap: wrap; margin-block: .75rem; }
+.worker-environment__facts { display: grid; grid-template-columns: minmax(10rem, 1fr) minmax(0, 3fr); gap: .75rem 1rem; }
+.worker-environment__facts dd { margin: 0; overflow-wrap: anywhere; }
+.worker-environment__command { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; border: 1px solid var(--outline); border-radius: .5rem; }
+.worker-dependencies__item { padding-block: 1rem; border-top: 1px solid var(--outline); }
+.worker-dependencies__item p { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .worker-environment__facts, .worker-environment .form-grid { grid-template-columns: minmax(0, 1fr); } }

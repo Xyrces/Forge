@@ -27,8 +27,17 @@ public interface IWorkerJobs
 
 /// <summary>Wait cancellation detaches the controller; only a persisted cancellation request stops a worker.</summary>
 public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs jobs, string datasetId,
-    Func<CancellationToken, Task>? ensureAdmission = null) : IAgentRunner, IReviewWorkerLifecycle
+    Func<CancellationToken, Task>? ensureAdmission = null,
+    Func<string, CancellationToken, Task<string?>>? resolveToolchainImage = null) : IAgentRunner, IReviewWorkerLifecycle
 {
+    public static void ValidateImageDigest(string image)
+    {
+        var index = image.LastIndexOf("@sha256:", StringComparison.Ordinal);
+        if (index < 1 || image.Length - index != 72 || image[(index + 8)..].Any(c => !Uri.IsHexDigit(c))
+            || image.Any(char.IsWhiteSpace))
+            throw new InvalidOperationException("Toolchain image must be pinned by immutable sha256 digest.");
+    }
+
     public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
         IReadOnlyDictionary<string, object>? context, CancellationToken ct) =>
         await RunCoreAsync(role, prompt, sessionId, context, false, ct)
@@ -64,6 +73,14 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
         var assignment = await store.GetAsync(id, ct);
         if (assignment is null)
         {
+            // Caller context cannot select execution infrastructure. Pin only once per durable assignment.
+            values.Remove("trustedToolchainImage");
+            var toolchain = resolveToolchainImage is null ? null : await resolveToolchainImage(project, ct);
+            if (!string.IsNullOrWhiteSpace(toolchain))
+            {
+                ValidateImageDigest(toolchain);
+                values["trustedToolchainImage"] = toolchain;
+            }
             var sourceSha = values.GetValueOrDefault("sourceSha");
             if (string.IsNullOrWhiteSpace(sourceSha)) sourceSha = await ReadHeadAsync(worktree, ct);
             values["sourceSha"] = sourceSha;
@@ -215,6 +232,21 @@ public sealed class KubernetesWorkerJobs(HttpClient http, WorkerOptions options)
                 if (condition.GetProperty("status").GetString() == "True"
                     && condition.GetProperty("type").GetString() is "Failed" or "Complete")
                     return "Worker Job terminated without a SQL result: " + condition.GetProperty("type").GetString();
+        // A pull/configuration failure happens before WorkerHost can write a SQL result.
+        // Surface the actionable reason rather than silently waiting for the Job's hour-long deadline.
+        using var pods = await http.GetAsync($"api/v1/namespaces/{Uri.EscapeDataString(options.Namespace)}/pods?labelSelector=forge-attempt%3D{Uri.EscapeDataString(attemptId)}", ct);
+        pods.EnsureSuccessStatusCode();
+        using var podDocument = JsonDocument.Parse(await pods.Content.ReadAsStringAsync(ct));
+        if (podDocument.RootElement.TryGetProperty("items", out var items))
+            foreach (var pod in items.EnumerateArray())
+                if (pod.TryGetProperty("status", out var podStatus))
+                    foreach (var key in new[] { "initContainerStatuses", "containerStatuses" })
+                        if (podStatus.TryGetProperty(key, out var containers))
+                            foreach (var container in containers.EnumerateArray())
+                                if (container.TryGetProperty("state", out var state) && state.TryGetProperty("waiting", out var waiting)
+                                    && waiting.TryGetProperty("reason", out var reason)
+                                    && reason.GetString() is "ImagePullBackOff" or "ErrImagePull" or "InvalidImageName" or "CreateContainerConfigError" or "CrashLoopBackOff")
+                                    return $"Worker container {container.GetProperty("name").GetString()} could not start: {reason.GetString()}. Check the approved image digest, registry access and toolchain configuration.";
         return null;
     }
 
@@ -246,7 +278,7 @@ public sealed class KubernetesWorkerJobs(HttpClient http, WorkerOptions options)
         var labels = new Dictionary<string, string> { ["app.kubernetes.io/name"] = "forge-worker", ["forge-attempt"] = assignment.Id };
         if (assignment.Role == "QA" && assignment.DispatchId.StartsWith("integration-verify-", StringComparison.Ordinal))
             labels[VerificationJobEvents.Label] = "true";
-        return new
+        var manifest = new
         {
             apiVersion = "batch/v1", kind = "Job",
             metadata = new { name = "forge-agent-" + assignment.Id, @namespace = options.Namespace,
@@ -286,6 +318,7 @@ public sealed class KubernetesWorkerJobs(HttpClient http, WorkerOptions options)
                 }
             }
         };
+        return WorkerToolchainManifest.Apply(manifest, assignment, options);
     }
 
     public static HttpClient CreateInClusterClient()

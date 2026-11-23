@@ -315,6 +315,11 @@ public async Task<AgentRunResult> RunAsync(
             // completion); only blocksIssueId filings become real
             // tasks immediately.
             var drafts = new Core.FollowUpDraftStore((Core.IssueStore)followUpStore);
+            if (followUpStore is Core.IssueStore dependencyStore
+                && context.TryGetValue("projectId", out var dependencyProject)
+                && dependencyProject is string dependencyProjectId
+                && dependencyStore.ProjectId == dependencyProjectId)
+                tools.Add(new WorkerDependencyTool(dependencyStore, followUpSource).AsAIFunction());
             var followUpSprints = new Core.SprintStore((Core.IssueStore)followUpStore);
             tools.Add(new FollowUpTool(followUpStore, followUpSource, role.ToString(),
                 drafts,

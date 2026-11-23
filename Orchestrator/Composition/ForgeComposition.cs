@@ -65,6 +65,8 @@ public static class ForgeComposition
         services.AddSingleton(boot);
         services.AddSingleton(projectStore);
         services.AddSingleton<IProjectStore>(projectStore);
+        var workerEnvironments = new ProjectWorkerEnvironmentStore(projectStore);
+        services.AddSingleton<IProjectWorkerEnvironmentStore>(workerEnvironments);
         services.AddSingleton(cloner);
         services.AddSingleton(secretStore);
         services.AddSingleton<ISecretStore>(secretStore);
@@ -375,7 +377,8 @@ public static class ForgeComposition
                 loggerFactory.CreateLogger<Workers.VerificationJobEvents>()));
             agentRunner = new Workers.KubernetesAgentRunner(
                 workerAttempts,
-                new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission);
+                new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission,
+                workerEnvironments.ResolveImageAsync);
         }
         services.AddSingleton(localAgentRunner);
         services.AddSingleton<IAgentRunner>(agentRunner);
@@ -794,6 +797,7 @@ public static class ForgeComposition
             reviewerRunner: agentRunner,
             loggerFactory: loggerFactory,
             projectStore: projectStore,
+            workerEnvironments: workerEnvironments,
             projectCloner: cloner,
             githubOptions: options.GitHub,
             secretStore: secretStore,

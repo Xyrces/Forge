@@ -137,6 +137,72 @@ public sealed class WorkerAttemptTests : IDisposable
         Assert.Throws<InvalidOperationException>(() => KubernetesWorkerJobs.BuildManifest(Assignment(), options));
     }
 
+    [Fact]
+    public async Task ToolchainResolutionPinsNewAssignmentAndIgnoresCallerAndLaterChanges()
+    {
+        var jobs = new PendingVerificationJobs(_store);
+        var context = new Dictionary<string, object> { ["projectId"] = "forge", ["issueId"] = "task", ["dispatchId"] = "pinned-env",
+            ["worktreePath"] = Path.GetFullPath("."), ["sourceSha"] = new string('a', 40), ["trustedToolchainImage"] = "attacker:latest" };
+        var calls = 0;
+        var image = "registry/toolchain@sha256:" + new string('b', 64);
+        var runner = new KubernetesAgentRunner(_store, jobs, "dataset", resolveToolchainImage: (project, ct) =>
+        { Assert.Equal("forge", project); calls++; return Task.FromResult<string?>(image); });
+        Assert.Null(await runner.StartOrObserveVerificationAsync(context, default));
+        Assert.Equal(image, JsonSerializer.Deserialize<WorkerInvocation>(jobs.Assignment!.AssignmentJson)!.Context["trustedToolchainImage"]);
+        image = "registry/toolchain@sha256:" + new string('c', 64);
+        Assert.Null(await runner.StartOrObserveVerificationAsync(context, default));
+        Assert.Equal(1, calls);
+        Assert.Equal(1, jobs.Created);
+    }
+
+    [Fact]
+    public async Task NoResolverStripsUntrustedImageAndDoesNotUpgradeLegacyAssignment()
+    {
+        var jobs = new PendingVerificationJobs(_store);
+        var context = new Dictionary<string, object> { ["projectId"] = "forge", ["issueId"] = "task", ["dispatchId"] = "legacy-env",
+            ["worktreePath"] = Path.GetFullPath("."), ["sourceSha"] = new string('a', 40), ["trustedToolchainImage"] = "attacker:latest" };
+        Assert.Null(await new KubernetesAgentRunner(_store, jobs, "dataset").StartOrObserveVerificationAsync(context, default));
+        Assert.False(JsonSerializer.Deserialize<WorkerInvocation>(jobs.Assignment!.AssignmentJson)!.Context.ContainsKey("trustedToolchainImage"));
+        Assert.Null(await new KubernetesAgentRunner(_store, jobs, "dataset", resolveToolchainImage: (_, _) => throw new Exception("must not resolve old assignment"))
+            .StartOrObserveVerificationAsync(context, default));
+    }
+
+    [Fact]
+    public void CustomToolchainCannotSeeWorkerCredentialsOrWholeStateVolume()
+    {
+        var image = "registry/compiler@sha256:" + new string('c', 64);
+        var invocation = new WorkerInvocation(AgentType.CoreDev, "task", null, new() { ["trustedToolchainImage"] = image });
+        var assignment = Assignment() with { AssignmentJson = JsonSerializer.Serialize(invocation), WorktreePath = "/var/lib/forge/projects/forge/.forge/worktrees/task" };
+        var options = new WorkerOptions { Image = "registry/forge@sha256:" + new string('a', 64) };
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(KubernetesWorkerJobs.BuildManifest(assignment, options)));
+        var pod = document.RootElement.GetProperty("spec").GetProperty("template").GetProperty("spec");
+        var sidecar = pod.GetProperty("initContainers").EnumerateArray().Single(c => c.GetProperty("name").GetString() == "toolchain");
+        Assert.Equal(image, sidecar.GetProperty("image").GetString());
+        Assert.Equal("Always", sidecar.GetProperty("restartPolicy").GetString());
+        Assert.DoesNotContain("secretKeyRef", sidecar.GetRawText());
+        Assert.DoesNotContain("forge-worker-runtime", sidecar.GetRawText());
+        var state = sidecar.GetProperty("volumeMounts").EnumerateArray().Single(m => m.GetProperty("name").GetString() == "state");
+        Assert.Equal("projects/forge/.forge/worktrees/task", state.GetProperty("subPath").GetString());
+        Assert.Equal(assignment.WorktreePath, state.GetProperty("mountPath").GetString());
+        Assert.True(sidecar.GetProperty("securityContext").GetProperty("readOnlyRootFilesystem").GetBoolean());
+        Assert.False(sidecar.GetProperty("securityContext").GetProperty("allowPrivilegeEscalation").GetBoolean());
+        Assert.Equal(options.Image, pod.GetProperty("containers")[0].GetProperty("image").GetString());
+    }
+
+    [Theory]
+    [InlineData("/var/lib/forge")]
+    [InlineData("/var/lib/forge/projects/forge")]
+    [InlineData("/var/lib/forge/projects/forge/.forge/git-credentials")]
+    [InlineData("/var/lib/forge/projects/other/.forge/worktrees/task")]
+    [InlineData("/var/lib/forge/projects/forge/.forge/worktrees/task/child")]
+    public void CustomImageRejectsBroadOrCrossProjectMount(string path)
+    {
+        var invocation = new WorkerInvocation(AgentType.CoreDev, "task", null, new() { ["trustedToolchainImage"] = "registry/tool@sha256:" + new string('b', 64) });
+        var assignment = Assignment() with { WorktreePath = path, AssignmentJson = JsonSerializer.Serialize(invocation) };
+        Assert.Throws<InvalidOperationException>(() => KubernetesWorkerJobs.BuildManifest(assignment,
+            new WorkerOptions { Image = "registry/forge@sha256:" + new string('a', 64) }));
+    }
+
     public void Dispose() => File.Delete(_path);
     private sealed class DeleteHandler : HttpMessageHandler
     {
