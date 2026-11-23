@@ -30,7 +30,7 @@ public sealed class ToolchainCommandTests
     public async Task SocketRequestCarriesOnlyExplicitProjectSecretsAndReturnsExitStatus()
     {
         if (!OperatingSystem.IsLinux()) return;
-        var path = Path.Combine(Path.GetTempPath(), "tc-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine("/tmp", "forge-tc-" + Guid.NewGuid().ToString("N"));
         using var server = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         server.Bind(new UnixDomainSocketEndPoint(path)); server.Listen();
         try
@@ -59,7 +59,7 @@ public sealed class ToolchainCommandTests
     public async Task CallerCancellationClosesRemoteConnection()
     {
         if (!OperatingSystem.IsLinux()) return;
-        var path = Path.Combine(Path.GetTempPath(), "tc-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine("/tmp", "forge-tc-" + Guid.NewGuid().ToString("N"));
         using var server = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         server.Bind(new UnixDomainSocketEndPoint(path)); server.Listen();
         using var cancel = new CancellationTokenSource();
