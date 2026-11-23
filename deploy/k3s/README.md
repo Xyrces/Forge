@@ -44,61 +44,67 @@ Keep these files in a directory outside the checkout, readable only by the
 installing user. The root [installation quickstart](../../README.md#installation-quickstart) shows how
 to supply them to the installer.
 
-Prepare a dedicated Azure SQL database and allow connections from the Linux
-host. A database administrator must create three distinct database users and
-authorize their access before installation.
+### Create the database and its three logins
 
-| File | Identity and required access |
+You can do the Azure setup yourself in a browser. Sign in to the
+[Azure portal](https://portal.azure.com/) with your subscription's account.
+
+1. Create an Azure SQL **single database** dedicated to Forge, using an empty
+   database as the data source. Create a logical SQL server if you need one.
+   Enable SQL authentication and save the server administrator login and password
+   in your password manager. You will use that account for the initial setup.
+2. Choose the database's compute and cost settings. For an evaluation, Azure's
+   free tier offers **Auto-pause the database until next month** when the monthly
+   allowance is exhausted. Forge cannot run while its database is paused. Confirm
+   your selected behavior before creating the database. [Azure SQL free tier](https://learn.microsoft.com/en-us/azure/azure-sql/database/free-tier?view=azuresql)
+3. Open the server's **Networking** settings and enable public access for
+   **Selected networks**. Add a firewall rule for your Linux host's public outbound
+   IP address and your browser's public IP address if they differ. Keep
+   **Allow Azure services and resources to access this server** off. Save the rules.
+   The Linux host needs outbound TCP access to port 1433. [Azure SQL network setup](https://learn.microsoft.com/en-us/azure/azure-sql/database/secure-database-tutorial?view=azuresql)
+4. On the database's Overview page, copy its full server hostname and database
+   name. Open **Query editor**, sign in with the SQL administrator account, and
+   keep the editor open for the setup script below. [Query editor](https://learn.microsoft.com/en-us/azure/azure-sql/database/connect-query-portal?view=azuresql-db)
+
+Run the [first-install example](../../docs/examples/prepare-first-install.py) from
+the [quickstart](../../README.md#installation-quickstart). It creates the following
+files in `$forge_setup/inputs`. It takes credentials through hidden prompts.
+
+| File | Used for |
 | --- | --- |
-| `sql-controller.txt` | The controller user, such as `forge-k3s-runtime`, with application read/write permissions on Forge's registry and workload schemas. |
-| `sql-initialize.txt` | The initializer user, with authority to create and migrate Forge schemas, create objects, and grant or deny the runtime permissions. |
-| `sql-worker.txt` | The worker user, such as `forge-k3s-worker`. The initializer installs its scoped schema, task, attempt, and budget permissions. |
+| `create-users.sql` | Run this once in the query editor for your new database. Success lists all three Forge users. The file contains the generated passwords. |
+| `sql-initialize.txt` | The initializer uses its own `db_owner` account to create and migrate schemas and grant access. |
+| `sql-controller.txt` | The controller can read and write the initial `core` and `proj_forge` schemas. |
+| `sql-worker.txt` | Each worker uses the permissions the initializer grants to its database account. |
 
-Each file contains one connection string targeting the same database. For SQL
-password authentication, the shape is
+Each connection file selects the same database and authenticates a different
+contained user. As you add projects, Forge provisions their schemas and grants
+the runtime accounts access. Keep the private files and dataset ID for retries
+and upgrades. [Azure SQL database users](https://learn.microsoft.com/en-us/azure/azure-sql/database/logins-create-manage)
 
-```text
-Server=tcp:<server>.database.windows.net,1433;Initial Catalog=<database>;User ID=<user>;Password=<password>;Encrypt=True;TrustServerCertificate=False;
-```
+### Package access and application settings
 
-Use the connection-string escaping required by your credentials. The installer
-creates the application schemas through the initializer connection. Database
-creation, user creation, firewall rules, and the controller's baseline grants
-are administrator setup. The controller and worker must have runtime privileges
-without DDL authority. See [SQL identity separation](#sql-identity-separation-and-trust-boundary)
-for the enforced permissions and credential boundaries.
-
-Copy [appsettings.first-install.json](appsettings.first-install.json) to the
-private directory as `appsettings.json`. Set `bootstrap.controllerPrincipal`
-and `bootstrap.workerPrincipal` to the exact database user names above.
-The template starts with paid model calls disabled. Keep SQL connection strings
-in the three separate files.
-
-Create `worker-packages.json` with a GitHub account and token that can read
-the private Talaria packages. The account needs package access and the token
-needs `read:packages` permission.
+The same example writes `worker-packages.json` for the private Talaria NuGet
+feed and `registry.json` for the Forge image in GHCR. Use an account that can
+read both packages and a classic token scoped to `read:packages`.
+For manual setup, use this format for `worker-packages.json`.
 
 ```json
 {"username":"<github-user>","token":"<package-read-token>"}
 ```
 
-For a private controller image, create `registry.json` using the Docker auth
-format. The `auth` value is the base64 encoding of the registry username,
-a colon, and its package-read token. The account must have access to the chosen
-GHCR image. A machine-local credential-helper entry cannot be used by the installer.
+Use Docker's explicit authentication format for `registry.json`.
 
 ```json
-{"auths":{"ghcr.io":{"auth":"<base64-encoded-username-and-token>"}}}
+{"auths":{"ghcr.io":{"auth":"<base64-of-username-colon-token>"}}}
 ```
 
-Review the private configuration before the first apply. The ordinary release
-path requires the same configuration and credential bytes on later installs.
-Changing them requires an intentional configuration-maintenance operation.
-For autonomous work, configure the provider and spending authorization, the
-project's publishing and review identities, and its deployment targets before
-releasing the initial holds. [Runtime configuration](../../docs/runtime-reference.md)
-· [GitHub App identities](../../docs/github-app-identities.md)
-· [Deployment environments](../../docs/deployment-environments.md)
+`appsettings.json` starts from the [release template](appsettings.first-install.json).
+For a dashboard-only first look, the example leaves paid model calls disabled.
+With `--enable-models`, it adds OpenAI access and spending limits for a real
+Intake conversation. Review the limits before applying the installation. The
+publisher/reviewer Apps use their own controller-only bundle. [First initiative](../../docs/user-guide.md#run-your-first-initiative)
+· [GitHub App identities](../../docs/github-app-identities.md) · [Deployment environments](../../docs/deployment-environments.md)
 
 ## One installation/release entrypoint
 

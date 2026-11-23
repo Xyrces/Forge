@@ -2,7 +2,43 @@
 
 Choose your project in the top bar. Open **Intake** when you have something you want to build, or **Sprints** when you want to see what’s happening to work you’ve already approved.
 
-[Project vision](#set-the-project-direction) · [Intake](#start-an-initiative) · [Sprints](#follow-a-sprint) · [Pull requests](#review-a-pull-request) · [Deployments](#promote-a-release) · [When work stops](#find-out-why-work-stopped)
+[First initiative](#run-your-first-initiative) · [Project vision](#set-the-project-direction) · [Intake](#start-an-initiative) · [Sprints](#follow-a-sprint) · [Pull requests](#review-a-pull-request) · [Deployments](#promote-a-release) · [When work stops](#find-out-why-work-stopped)
+
+## Run your first initiative
+
+Prepare real model access **before the first install**. Add `--enable-models` when
+you run `docs/examples/prepare-first-install.py` in the
+[installation quickstart](../README.md#installation-quickstart). It asks for your
+OpenAI key privately, configures GPT-6.2 Sol with high reasoning and an 8,192-token
+output cap, and writes spending limits you can edit before installing. Intake can spend while
+later workflow stages are held. [Model reservation rules](revival-review/budget-qualification.md)
+
+Create the publisher and reviewer Apps under your own GitHub account using the
+[App setup steps](github-app-identities.md#register-and-install-one-time-human-setup).
+Save `config.json`, `publisher.pem` and `reviewer.pem` in
+`$forge_setup/github-apps` before the first install. The quickstart includes
+that bundle through `--github-apps-directory "$forge_setup/github-apps"`.
+Both Apps must be installed on the repository named in that configuration.
+
+The installer starts with `Xyrces/Forge` registered. Open **Projects → Add Project**
+and enter the HTTPS URL and default branch of your own repository. Select it in
+the top bar. In its overview, check **Pull request approvals** and
+**Role caps (persisted)**. **Forge reviewer** uses the two Apps. Set a deployment
+target if deploying is part of your acceptance criteria.
+
+Describe the project on the **Vision Board**, then choose **Intake → New idea**.
+Ask for one small change with an observable result. Refine the **Working brief**,
+compare revisions with **Changes**, and choose **Approve revision**. Open
+**Flow → Edit** to release design, grooming, sprint and merge. Release deployment
+when its target is ready. Follow the cards on **Sprints** and spending on **Now**.
+
+If registration reports a clone failure, correct access or branch settings before
+retrying through authenticated `POST /api/projects/{id}/sync`.
+[Project registration](distributed-project-registration.md) explains recovery.
+A keyless startup needs a controller restart to activate its first model key.
+Changing the installed immutable configuration needs an explicit maintenance
+operation; editing the local file alone does not update Forge.
+[Configuration rules](../deploy/k3s/README.md#prepare-the-private-install-files)
 
 ## Set the project direction
 
