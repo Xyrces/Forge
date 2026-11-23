@@ -203,6 +203,42 @@ public sealed class WorkerAttemptTests : IDisposable
             new WorkerOptions { Image = "registry/forge@sha256:" + new string('a', 64) }));
     }
 
+    [Fact]
+    public async Task ToolchainStartupDiagnosticsLeaveStockAndRunningJobsAloneAndAllowPullRetry()
+    {
+        var handler = new StartupHandler();
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("https://example.test/") };
+        var jobs = new KubernetesWorkerJobs(http, new WorkerOptions());
+        Assert.Null(await jobs.GetFailureAsync("stock", default)); Assert.Equal(0, handler.PodReads);
+        handler.Toolchain = true;
+        Assert.Null(await jobs.GetFailureAsync("custom", default)); Assert.Equal(1, handler.PodReads);
+        handler.Created = DateTimeOffset.UtcNow.AddMinutes(-3);
+        Assert.Contains("ImagePullBackOff", await jobs.GetFailureAsync("custom", default));
+        handler.Running = true;
+        Assert.Null(await jobs.GetFailureAsync("custom", default)); var reads = handler.PodReads;
+        Assert.Null(await jobs.GetFailureAsync("custom", default)); Assert.Equal(reads, handler.PodReads);
+    }
+
+    private sealed class StartupHandler : HttpMessageHandler
+    {
+        public bool Toolchain, Running;
+        public int PodReads;
+        public DateTimeOffset Created = DateTimeOffset.UtcNow;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            object body;
+            if (request.RequestUri!.AbsolutePath.Contains("/pods"))
+            {
+                PodReads++;
+                object state = Running ? new { running = new { } } : new { waiting = new { reason = "ImagePullBackOff" } };
+                body = new { items = new[] { new { status = new { containerStatuses = new[] { new { name = "agent", state } } } } } };
+            }
+            else body = new { metadata = new { creationTimestamp = Created }, spec = new { template = new { spec = new {
+                initContainers = Toolchain ? new[] { new { name = "toolchain" } } : [] } } } };
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(body)) });
+        }
+    }
+
     public void Dispose() => File.Delete(_path);
     private sealed class DeleteHandler : HttpMessageHandler
     {

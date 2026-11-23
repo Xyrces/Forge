@@ -98,6 +98,17 @@ public sealed class ConcurrentProjectRegistrationSqlTests
             var edited = (await environments.SetDefinitionAsync("second", new(active.Revision, "tools/Dockerfile")))!;
             Assert.Equal("pending", edited.Status);
             Assert.Equal(approval.Image, await environments.ResolveImageAsync("second"));
+            await projects.UpsertAsync(new("second", "Second", "https://example.invalid/rebound", "release"));
+            Assert.Null(await environments.ResolveImageAsync("second"));
+            Assert.Equal(3, (await projects.GetAsync("second"))!.Roles["coredev"]);
+            await Assert.ThrowsAsync<ProjectSettingsConflictException>(() => environments.QualifyAsync("second",
+                approval with { ExpectedRevision = edited.Revision, DefinitionRevision = edited.DefinitionRevision }));
+            var rebound = (await environments.GetAsync("second"))!;
+            await projects.DeleteAsync("second");
+            await projects.UpsertAsync(new("second", "Second", "https://example.invalid/rebound", "release"));
+            await environments.SetDefinitionAsync("second", new("0", "Dockerfile"));
+            await Assert.ThrowsAsync<ProjectSettingsConflictException>(() => environments.QualifyAsync("second",
+                approval with { ExpectedRevision = rebound.Revision, DefinitionRevision = rebound.DefinitionRevision }));
         }
         finally
         {

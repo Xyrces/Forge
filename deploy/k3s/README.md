@@ -287,8 +287,10 @@ continues to run the agent, enforce its plan and record its verification result.
      --check 'cmake --version && ninja --version'
    ```
 
-The helper fetches the registered default branch, exports the chosen context from
-that commit, builds the image and runs the optional project check offline. It
+The helper fetches the registered default branch, exports the chosen context using
+`git archive`, builds the image and runs the optional project check offline.
+Supply build inputs as tracked files. Submodule contents and Git LFS objects
+need to be packaged separately. The helper
 imports the image into the local K3s runtime and activates its immutable digest
 only after all checks pass. A concurrent settings change requires a fresh build.
 Refresh the project settings to see the active digest and source commit.

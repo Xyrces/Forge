@@ -212,6 +212,8 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
 
 public sealed class KubernetesWorkerJobs(HttpClient http, WorkerOptions options) : IWorkerJobs
 {
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _startedToolchains = new();
+
     public async Task EnsureJobAsync(WorkerAssignment assignment, CancellationToken ct)
     {
         var manifest = BuildManifest(assignment, options);
@@ -232,26 +234,43 @@ public sealed class KubernetesWorkerJobs(HttpClient http, WorkerOptions options)
                 if (condition.GetProperty("status").GetString() == "True"
                     && condition.GetProperty("type").GetString() is "Failed" or "Complete")
                     return "Worker Job terminated without a SQL result: " + condition.GetProperty("type").GetString();
-        // A pull/configuration failure happens before WorkerHost can write a SQL result.
-        // Surface the actionable reason rather than silently waiting for the Job's hour-long deadline.
+        // Stock Jobs retain their original polling behavior. Only inspect pod startup
+        // for project-toolchain Jobs, and stop the extra list once their agent is running.
+        if (_startedToolchains.ContainsKey(attemptId)
+            || !document.RootElement.TryGetProperty("spec", out var jobSpec)
+            || !jobSpec.TryGetProperty("template", out var template)
+            || !template.TryGetProperty("spec", out var podSpec)
+            || !podSpec.TryGetProperty("initContainers", out var init)
+            || !init.EnumerateArray().Any(c => c.TryGetProperty("name", out var n) && n.GetString() == "toolchain")) return null;
+        var pullGraceElapsed = document.RootElement.TryGetProperty("metadata", out var metadata)
+            && metadata.TryGetProperty("creationTimestamp", out var created)
+            && created.TryGetDateTimeOffset(out var createdAt) && DateTimeOffset.UtcNow - createdAt > TimeSpan.FromMinutes(2);
         using var pods = await http.GetAsync($"api/v1/namespaces/{Uri.EscapeDataString(options.Namespace)}/pods?labelSelector=forge-attempt%3D{Uri.EscapeDataString(attemptId)}", ct);
         pods.EnsureSuccessStatusCode();
         using var podDocument = JsonDocument.Parse(await pods.Content.ReadAsStringAsync(ct));
         if (podDocument.RootElement.TryGetProperty("items", out var items))
             foreach (var pod in items.EnumerateArray())
                 if (pod.TryGetProperty("status", out var podStatus))
+                {
+                    if (podStatus.TryGetProperty("containerStatuses", out var mainContainers)
+                        && mainContainers.EnumerateArray().Any(c => c.TryGetProperty("name", out var n) && n.GetString() == "agent"
+                            && c.TryGetProperty("state", out var st) && st.TryGetProperty("running", out _)))
+                    { _startedToolchains.TryAdd(attemptId, 0); return null; }
                     foreach (var key in new[] { "initContainerStatuses", "containerStatuses" })
                         if (podStatus.TryGetProperty(key, out var containers))
                             foreach (var container in containers.EnumerateArray())
                                 if (container.TryGetProperty("state", out var state) && state.TryGetProperty("waiting", out var waiting)
                                     && waiting.TryGetProperty("reason", out var reason)
-                                    && reason.GetString() is "ImagePullBackOff" or "ErrImagePull" or "InvalidImageName" or "CreateContainerConfigError" or "CrashLoopBackOff")
+                                    && (reason.GetString() is "InvalidImageName" or "CreateContainerConfigError"
+                                        || pullGraceElapsed && reason.GetString() is "ImagePullBackOff" or "ErrImagePull" or "CrashLoopBackOff"))
                                     return $"Worker container {container.GetProperty("name").GetString()} could not start: {reason.GetString()}. Check the approved image digest, registry access and toolchain configuration.";
+                }
         return null;
     }
 
     public async Task CancelAndWaitAsync(string attemptId, CancellationToken ct)
     {
+        _startedToolchains.TryRemove(attemptId, out _);
         var path = $"apis/batch/v1/namespaces/{Uri.EscapeDataString(options.Namespace)}/jobs/forge-agent-{attemptId}";
         using var delete = new HttpRequestMessage(HttpMethod.Delete, path)
         {

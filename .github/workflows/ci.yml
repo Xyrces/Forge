@@ -63,6 +63,9 @@ jobs:
       - name: Test release and installer protocol
         run: python3 -m unittest discover -s tests/deployment -v
 
+      - name: Test the worker command helper
+        run: go test deploy/k3s/command-server/*.go
+
       - name: Test repository privacy rules
         run: python3 -m unittest discover -s tests/privacy -v
 
